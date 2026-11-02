@@ -80,6 +80,7 @@ from nurec.models.gaussians.segment_plan import (
 )
 from nurec.models.gaussians.strategies import (
     BaseGaussianStrategy,  # Note: imported from strategies/__init__.py, not base.py, so that all strategies get imported.
+    ECADStrategy,
     GSplatStrategy,
     MCMCStrategy,
 )
@@ -2295,7 +2296,7 @@ class GaussiansComposite(BaseModel, CompositeModel):
 
     def _supports_fused_gather_generation_plan(self) -> bool:
         """Restrict shape-schedule ownership to the two known exact strategies."""
-        return type(getattr(self, "gaussians_strategy", None)) in (GSplatStrategy, MCMCStrategy)
+        return type(getattr(self, "gaussians_strategy", None)) in (GSplatStrategy, MCMCStrategy, ECADStrategy)
 
     def _is_fused_gather_generation_refresh_step(self, global_step: int) -> bool:
         """Ask whether batch end may change per-layer row counts or layout."""

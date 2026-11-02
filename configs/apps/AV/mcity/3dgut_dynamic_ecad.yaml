@@ -1,0 +1,65 @@
+# @package _global_
+# Efficient Confidence-Aware Densification (Hofer et al., arXiv 2610.13541) on the generic AV MCMC preset; see
+# nurec/models/gaussians/strategies/ecad.py for what follows the paper and what is substituted.
+# - MCMC budget, growth and split correction as in 3dgut_dynamic_mcmc.yaml; relocation every 400 steps from the
+#   lowest-contribution Gaussians; no SGLD noise; no opacity-threshold or invisible-step relocation.
+# - MCMC regularisers at our best mcity values (scale 1e-3, opacity 5e-3) and, as in the paper, off from step 25k.
+# - Confidence is camera_extra_signal[:, 0]; NuRec's own camera extra-signal rendering is switched off so only the
+#   ECAD hook renders it.
+
+defaults:
+  - /apps/AV/_base_3dgut_dynamic.yaml
+  - /apps/AV/module_mixins/_mcmc_mixin.yaml
+  - override /model/gaussians/strategy@model.strategy: mcmc
+
+model:
+  strategy:
+    name: ecad
+    relocate:
+      frequency: 400
+      max_invisible_steps: null
+    ecad:
+      layer_ids: [background]
+  layers:
+    background:
+      particle:
+        camera_extra_signal_dim: 1
+    dynamic_rigids:
+      particle:
+        camera_extra_signal_dim: 1
+    dynamic_deformables:
+      particle:
+        camera_extra_signal_dim: 1
+  renderer:
+    outputs:
+      camera:
+        enable_sensor_features: false
+
+loss:
+  gaussian_scale:
+    lambda_: 0.001
+    lambda_scheduler:
+      name: linear_lambda
+      start: 25000
+      end: 25100
+      update_interval: step
+      update_frequency: 1
+      lambda_end: 0.0
+  gaussian_density:
+    lambda_scheduler:
+      name: linear_lambda
+      start: 25000
+      end: 25100
+      update_interval: step
+      update_frequency: 1
+      lambda_end: 0.0
+  ecad_confidence:
+    fn: l1
+    reduce:
+      name: mean
+    lambda_: 1.0
+    lambdas:
+      beta: 0.075
+      l1: 0.8
+      c_min: 0.001
+      c_max: 5.0

@@ -823,6 +823,95 @@ class SSIMLoss(BaseRenderLoss, BaseLossWithSemanticWeights):
         )
 
 
+def _ssim_map(img1: torch.Tensor, img2: torch.Tensor, window: torch.Tensor, window_size: int) -> torch.Tensor:
+    """Per-pixel SSIM of two [H, W, C] images, averaged over channels -> [H, W]."""
+    x = img1.permute(2, 0, 1).unsqueeze(0)
+    y = img2.permute(2, 0, 1).unsqueeze(0)
+    channels = x.shape[1]
+    pad = window_size // 2
+
+    def blur(t: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.conv2d(t, window, padding=pad, groups=channels)
+
+    mu_x, mu_y = blur(x), blur(y)
+    var_x = blur(x * x) - mu_x * mu_x
+    var_y = blur(y * y) - mu_y * mu_y
+    cov = blur(x * y) - mu_x * mu_y
+    c1, c2 = 0.01**2, 0.03**2
+    ssim = ((2 * mu_x * mu_y + c1) * (2 * cov + c2)) / ((mu_x * mu_x + mu_y * mu_y + c1) * (var_x + var_y + c2))
+    return ssim.mean(dim=1)[0]
+
+
+@register_loss("ecad_confidence")
+class ECADConfidenceLoss(BaseRenderLoss):
+    """Confidence loss of ECAD (Hofer et al., arXiv 2610.13541, Eq. 3) plus the probes the ECAD strategy reads.
+
+    L_conf(p) = L_rgb(p) * C(p) - beta * log C(p), with C(p) the alpha-blended per-Gaussian confidence clamped to
+    [c_min, c_max] and L_rgb = l1 * |pred - gt| + (1 - l1) * (1 - SSIM) per pixel. Only the confidences learn from it:
+    L_rgb is detached and C reaches them through a zero-valued twin channel (see `_ECADRenderState`), so colours and
+    geometry receive no gradient from this term. The same surrogate routes the per-pixel SSIM error and a constant 1
+    into the two probe channels, whose gradients the strategy reads. Its forward value is exactly zero.
+
+    `lambdas` may set beta (0.075), l1 (0.8), c_min (1e-3) and c_max (5).
+    """
+
+    camera_loss_kind = CameraLossKind.RGB
+
+    def __init__(self, config: LossItemConfig, trainer_config: TrainerConfig, **kwargs) -> None:
+        super().__init__("ecad_confidence", config, trainer_config, **kwargs)
+        lambdas = config.lambdas or {}
+        self.beta = float(lambdas.get("beta", 0.075))
+        self.l1_weight = float(lambdas.get("l1", 0.8))
+        self.c_min = float(lambdas.get("c_min", 1e-3))
+        self.c_max = float(lambdas.get("c_max", 5.0))
+        self.window_size = 11
+        self.window = create_window(window_size=self.window_size, channel=3)
+
+    def forward(
+        self,
+        results: GaussiansCompositeReturn,
+        target: DataAndRenderingBatch,
+        model: BaseModel,
+    ) -> Optional[LossReturn]:
+        from nurec.models.gaussians.renderers import ECAD_RENDER_STATE
+
+        rendered = ECAD_RENDER_STATE.rendered
+        ECAD_RENDER_STATE.rendered = None
+        if rendered is None or (camera := target.data.camera) is None or results.rendered_cam is None:
+            return None
+
+        labels = camera.labels
+        gt = unpack_optional(labels.rgb)  # [1, H, W, 3]
+        assert gt.shape[0] == 1, "ecad_confidence expects one image per batch"
+        if rendered.shape[:2] != gt.shape[1:3]:
+            raise ValueError(f"ECAD channels {tuple(rendered.shape)} do not match the image {tuple(gt.shape)}")
+        valid = camera_loss_valid_mask(self.camera_loss_kind, unpack_optional(labels.flags))[0, ..., 0]  # [H, W]
+        gt = gt[0]
+        with torch.no_grad():
+            pred = unpack_optional(results.rendered_cam.rgb).reshape(gt.shape).detach()
+            window = self.window.to(device=gt.device, dtype=gt.dtype)
+            ssim = _ssim_map(torch.where(valid[..., None], pred, gt), gt, window, self.window_size)
+            ssim_error = (1.0 - ssim).clamp_min(0.0)
+            l_rgb = self.l1_weight * (pred - gt).abs().mean(dim=-1) + (1.0 - self.l1_weight) * ssim_error
+            c_raw = rendered[..., 0].detach()
+            inside = (c_raw > self.c_min) & (c_raw < self.c_max)
+            c = c_raw.clamp(self.c_min, self.c_max)
+            n_valid = valid.sum().clamp_min(1)
+            g_conf = torch.where(valid & inside, (l_rgb - self.beta / c) / n_valid, 0.0)
+            e_ssim = torch.where(valid, ssim_error, 0.0)
+            w_pix = valid.to(rendered.dtype)
+
+        surrogate = (
+            (g_conf * rendered[..., 1]).sum() + (e_ssim * rendered[..., 2]).sum() + (w_pix * rendered[..., 3]).sum()
+        )
+        return LossReturn(
+            name=self.name,
+            lambda_=self.lambda_,
+            value=surrogate.reshape(1),
+            reduce_fn=self.reduce_fn,
+        )
+
+
 @register_loss("sky_env_map_background")
 class SkyEnvMapBackgroundLoss(BaseRenderLoss):
     supported_model_types = (GaussiansComposite,)

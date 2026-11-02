@@ -1137,8 +1137,53 @@ class MCMCStrategyConfig(BaseStrategyConfig):
     )
 
 
+class ECADStrategyConfig(MCMCStrategyConfig):
+    """Efficient Confidence-Aware Densification (Hofer et al., arXiv 2610.13541) on top of the MCMC strategy.
+
+    Keeps MCMC's fixed budget, 5% growth per `add.frequency` and opacity/scale split correction, but draws source
+    Gaussians from image error instead of opacity and relocates the Gaussians that contribute least to the images.
+    Relocation runs every `relocate.frequency` steps (400 in the paper) between `relocate.start_iteration` and
+    `relocate.end_iteration`; the opacity-threshold relocation of MCMC and its SGLD position noise are not used.
+    Per-Gaussian confidence lives in channel 0 of `camera_extra_signal` and is trained by the `ecad_confidence` loss.
+    """
+
+    class ECADConfig(BaseConfigSchema):
+        layer_ids: list[str] = Field(
+            default_factory=lambda: ["background"],
+            description="Layers that ECAD densifies; the population pool may hold no other non-empty layer.",
+        )
+        confidence_warmup_steps: int = Field(
+            default=5000, ge=0, description="eta = min(t / confidence_warmup_steps, 1) blends in the confidence term."
+        )
+        gradient_share: float = Field(
+            default=0.8, ge=0.0, le=1.0, description="Share of sources drawn from the gradient x confidence term."
+        )
+        relocation_share: float = Field(
+            default=0.1, ge=0.0, le=1.0, description="Share of Gaussians relocated per relocation step at full rate."
+        )
+        relocation_dead_only_until: int = Field(
+            default=5000, ge=0, description="Before this step only Gaussians with zero contribution are relocated."
+        )
+        relocation_decay_start: int = Field(
+            default=10000, ge=0, description="From this step the share decays as exp(-((t - start) / sigma)^2 / 2)."
+        )
+        relocation_decay_sigma: float = Field(default=5000.0, gt=0.0)
+        sample_positions: bool = Field(
+            default=True, description="Place each new Gaussian at a draw from N(mu, Sigma') of its source."
+        )
+        keep_mcmc_noise: bool = Field(default=False, description="Keep MCMC's SGLD position noise (off in the paper).")
+        init_confidence: float = Field(
+            default=0.0, description="Initial log-confidence gamma written to camera_extra_signal[:, 0] on a fresh start."
+        )
+        log_every: int = Field(default=1000, ge=0, description="Print ECAD statistics every this many steps (0 = off).")
+
+    name: Literal["ecad"]  # type: ignore[assignment]
+
+    ecad: ECADConfig = Field(default_factory=ECADConfig, description="ECAD sampling and relocation settings.")
+
+
 # Discriminated union of all strategy types
-StrategyConfigType = GsplatStrategyConfig | MCMCStrategyConfig
+StrategyConfigType = GsplatStrategyConfig | MCMCStrategyConfig | ECADStrategyConfig
 
 
 class BasePostProcessingConfig(BaseConfigSchema):

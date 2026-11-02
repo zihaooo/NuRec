@@ -45,6 +45,7 @@ py_library(
         "__init__.py",
         "base.py",
         "cuboid_mcmc.py",
+        "ecad.py",
         "gsplat.py",
         "mcmc.py",
     ],

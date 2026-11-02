@@ -95,6 +95,70 @@ class _CamToLidarMappingCommonKwargs(TypedDict):
     pose_jitter_rotation_rad: float
 
 
+class _ECADRenderState:
+    """Per-step hand-off between the camera render, the `ecad_confidence` loss and the ECAD strategy.
+
+    When enabled (by `ECADStrategy`), each training camera render appends four per-Gaussian channels to the
+    rasterizer's extra signals:
+      0. confidence exp(gamma), detached: its rendered map is the pixel confidence C(p);
+      1. exp(gamma) - exp(gamma).detach(): renders to zero, but carries d/d gamma of a loss on C(p) without
+         sending any gradient to colours or geometry (all channel values are zero);
+      2. a zero probe whose gradient becomes sum_p b_i(p) e(p) for the loss's per-pixel SSIM error e(p);
+      3. a zero probe whose gradient becomes sum_p b_i(p), the summed blending weight of each Gaussian.
+    gamma is channel 0 of the collected `camera_extra_signal`. Single-process training only.
+    """
+
+    num_channels: int = 4
+
+    def __init__(self) -> None:
+        self.enabled = False
+        self.clear()
+
+    def clear(self) -> None:
+        self.rendered: Optional[torch.Tensor] = None  # [H, W, 4], keeps the autograd graph for the loss
+        self.ssim_probe: Optional[torch.Tensor] = None  # [N] zero leaf
+        self.weight_probe: Optional[torch.Tensor] = None  # [N] zero leaf
+        self.opacities: Optional[torch.Tensor] = None  # [N] activated opacities used by the render
+        self.conics: Optional[torch.Tensor] = None  # [N, 3] inverse 2D covariance (pixels)
+        self.radii: Optional[torch.Tensor] = None  # [N] largest projected radius (pixels), 0 = culled
+        self.ray_origin: Optional[torch.Tensor] = None  # [3] camera centre of the render
+
+    def attach(self, camera_extra_signal: torch.Tensor, extra_signals: Optional[torch.Tensor]) -> torch.Tensor:
+        """Append the ECAD channels to the camera extra signals ([1, N, E] or None)."""
+        self.clear()
+        log_confidence = camera_extra_signal[:, 0]
+        confidence = torch.exp(log_confidence.clamp(-10.0, 5.0))
+        self.ssim_probe = torch.zeros_like(confidence.detach()).requires_grad_(True)
+        self.weight_probe = torch.zeros_like(confidence.detach()).requires_grad_(True)
+        channels = torch.stack(
+            [confidence.detach(), confidence - confidence.detach(), self.ssim_probe, self.weight_probe], dim=-1
+        ).unsqueeze(0)
+        return channels if extra_signals is None else torch.cat([extra_signals, channels], dim=-1)
+
+    def capture(
+        self,
+        rendered: torch.Tensor,
+        meta: dict[str, Any],
+        opacities: torch.Tensor,
+        rendering_data: RenderingData,
+    ) -> None:
+        """Keep the rendered ECAD channels [H, W, 4] and the per-Gaussian projection the strategy needs."""
+        self.rendered = rendered
+        self.opacities = opacities.detach().reshape(-1)
+        conics = meta.get("conics")
+        self.conics = None if conics is None else conics.detach().reshape(-1, 3)
+        radii = meta.get("radii")
+        if radii is not None:
+            radii = radii.detach()
+            if radii.ndim > 1 and radii.shape[-1] == 2:
+                radii = radii.amax(dim=-1)
+            self.radii = radii.reshape(-1)
+        self.ray_origin = rendering_data.rays[0].reshape(-1, 6)[0, :3].detach()
+
+
+ECAD_RENDER_STATE = _ECADRenderState()
+
+
 class BaseGaussianRenderer(ABC):
     def __init__(self, config: BaseRendererConfig, model: BaseModel) -> None:
         self.config = config
@@ -1641,6 +1705,19 @@ class GSplatRenderer(BaseGaussianRenderer):
                 else:
                     extra_signals = extra_signals_cat.unsqueeze(0)  # [1, N, E]
 
+            # ECAD (strategies/ecad.py): training camera renders carry four extra per-Gaussian channels.
+            ecad_dim = 0
+            if (
+                ECAD_RENDER_STATE.enabled
+                and is_camera
+                and torch.is_grad_enabled()
+                and segment_plan is None
+                and extra_signals_sh_degree is None
+                and gaussian_parameters["camera_extra_signal"].shape[-1] >= 1
+            ):
+                extra_signals = ECAD_RENDER_STATE.attach(gaussian_parameters["camera_extra_signal"], extra_signals)
+                ecad_dim = ECAD_RENDER_STATE.num_channels
+
             renderer_config: gsplat.RendererConfig
             if self.config.renderer_config == "mixed_batch":
                 renderer_config = gsplat.RendererConfig_MixedBatch()
@@ -1828,6 +1905,12 @@ class GSplatRenderer(BaseGaussianRenderer):
                     render_extra_signals = meta.get("render_extra_signals")
                     assert render_extra_signals is not None, "gsplat should have returned meta.render_extra_signals"
                     extra_signals = render_extra_signals[0, 0, :, :, :]  # (H, W, E)
+                    if ecad_dim:
+                        # Split the ECAD channels off before NuRec parses its own extra signals.
+                        ECAD_RENDER_STATE.capture(
+                            extra_signals[..., -ecad_dim:], meta, gaussian_params.opacities, rendering_data
+                        )
+                        extra_signals = extra_signals[..., :-ecad_dim] if extra_signals.shape[-1] > ecad_dim else None
 
                 if extra_signals is not None:
                     E = extra_signals.shape[-1]
