@@ -1,0 +1,8 @@
+# @package _global_
+# The generic AV preset with the MCMC densification strategy and its losses, as
+# apps/AV/PandaSet/3dgut_dynamic_mcmc.yaml sets them up for PandaSet.
+
+defaults:
+  - /apps/AV/_base_3dgut_dynamic.yaml
+  - /apps/AV/module_mixins/_mcmc_mixin.yaml
+  - override /model/gaussians/strategy@model.strategy: mcmc
