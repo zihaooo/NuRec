@@ -794,6 +794,9 @@ class SSIMLoss(BaseRenderLoss, BaseLossWithSemanticWeights):
 
         target_rgb = unpack_optional(camera.labels.rgb)  # [batch, height, width, 3]
         pred_rgb = unpack_optional(unpack_optional(results.rendered_cam).rgb).reshape_as(target_rgb)
+        extra = unpack_optional(results.rendered_cam).extra_ray_signals
+        if extra is not None and extra.rgb_before_appearance is not None:
+            pred_rgb = extra.rgb_before_appearance.reshape_as(target_rgb)  # VastGaussian: SSIM sees the raw render
         rays_valid_mask = camera_loss_valid_mask(
             self.camera_loss_kind, unpack_optional(camera.labels.flags)
         )  # [batch, height, width, 1]

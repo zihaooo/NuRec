@@ -1,0 +1,18 @@
+# VastGaussian's decoupled appearance modeling (Lin et al., CVPR 2024, Sec. 4.2): a per-image embedding + CNN that
+# adjusts the rendered image during training only (L1 sees the adjusted image, SSIM the raw one); discarded afterwards.
+
+defaults:
+  - base
+
+name: vast-appearance
+
+embedding_dim: 64
+downsample: 32
+hidden_channels: 256
+
+optimizer:
+  name: fused_adam
+  args:
+    lr: 0.001
+    eps: 1.e-15
+    betas: [0.9, 0.99]

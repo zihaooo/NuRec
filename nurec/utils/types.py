@@ -712,6 +712,8 @@ class ExtraSignal(TorchChunkable):
           post-processing
         - velocity: velocity vector (also known as scene flow) of the point
             Unit is meters per second (mps)              (n_rays, 3)                     [float32]
+        - rgb_before_appearance: rgb before the training-only decoupled appearance adjustment
+          (VastAppearancePostProcessing); the SSIM loss reads it   (n_rays, 3)          [float32]
     """
 
     normals: Optional[torch.Tensor] = None
@@ -724,6 +726,7 @@ class ExtraSignal(TorchChunkable):
     rgb_background: Optional[torch.Tensor] = None
     rgb_before_post_processing: Optional[torch.Tensor] = None
     velocity: Optional[torch.Tensor] = None
+    rgb_before_appearance: Optional[torch.Tensor] = None
 
     def extend(self, other: ExtraSignal) -> None:
         for k, v in dataclass_items(self):

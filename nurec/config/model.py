@@ -1272,11 +1272,22 @@ class DINOv2PEPostProcessingConfig(BasePostProcessingConfig):
 # Discriminated union of all post-processing types.
 # Discriminator is attached to the inner union so it composes correctly when this
 # type is used as the value type of a dict[str, ...] field.
+class VastAppearancePostProcessingConfig(BasePostProcessingConfig):
+    """VastGaussian's decoupled appearance modeling (Lin et al., CVPR 2024, Sec. 4.2): training only."""
+
+    name: Literal["vast-appearance"]
+
+    embedding_dim: int = 64  # per-image appearance embedding length
+    downsample: int = 32  # the rendered image is downsampled by this factor before the CNN
+    hidden_channels: int = 256  # channels after the first conv; halved by each of the 4 upsampling blocks
+
+
 PostProcessingConfigType = Annotated[
     BilateralGridPostProcessingConfig
     | PPISPPostProcessingConfig
     | PPISPLegacyPostProcessingConfig
-    | DINOv2PEPostProcessingConfig,
+    | DINOv2PEPostProcessingConfig
+    | VastAppearancePostProcessingConfig,
     Field(discriminator="name"),
 ]
 
