@@ -416,6 +416,16 @@ class SkyEnvMapBackground(BaseBackground, GsplatEnvMapBackground):  # type: igno
     __call__ = module_call_type(forward)
 
 
+def below_horizon_weight(rays_d: torch.Tensor, up: list[float], horizon_deg: float, blend_deg: float) -> torch.Tensor:
+    """Ground weight ``[N]`` of world rays ``[N, 3]``: 0 at or above elevation ``horizon_deg`` (relative to ``up``'s
+    horizontal plane), rising linearly to 1 at ``horizon_deg - blend_deg`` and below."""
+    up_t = torch.tensor(up, dtype=rays_d.dtype, device=rays_d.device)
+    up_t = up_t / up_t.norm()
+    sin_elevation = (rays_d @ up_t) / rays_d.norm(dim=-1).clamp_min(1e-12)
+    elevation_deg = torch.rad2deg(torch.asin(sin_elevation.clamp(-1.0, 1.0)))
+    return ((horizon_deg - elevation_deg) / blend_deg).clamp(0.0, 1.0)
+
+
 def ground_fill(
     rays_d: torch.Tensor,
     background_rgb: torch.Tensor,
@@ -432,15 +442,29 @@ def ground_fill(
     meets ground fill and nothing above the horizon changes. ``mask`` ``[N]`` (boolean, or a weight in [0, 1])
     multiplies the weight, e.g. to fill only masked pixels, and only the see-through part of each.
     """
-    up_t = torch.tensor(up, dtype=rays_d.dtype, device=rays_d.device)
-    up_t = up_t / up_t.norm()
-    sin_elevation = (rays_d @ up_t) / rays_d.norm(dim=-1).clamp_min(1e-12)
-    elevation_deg = torch.rad2deg(torch.asin(sin_elevation.clamp(-1.0, 1.0)))
-    weight = ((horizon_deg - elevation_deg) / blend_deg).clamp(0.0, 1.0)[:, None]
+    weight = below_horizon_weight(rays_d, up, horizon_deg, blend_deg)[:, None]
     if mask is not None:
         weight = weight * mask.reshape(-1, 1).to(device=weight.device, dtype=weight.dtype)
     ground = torch.tensor(ground_rgb, dtype=background_rgb.dtype, device=background_rgb.device).expand_as(background_rgb)
     return torch.lerp(background_rgb, ground, weight.to(background_rgb.dtype))
+
+
+def swap_sky_for_ground(
+    rgb: torch.Tensor,
+    pre_pp_rgb: torch.Tensor,
+    sky_rgb: torch.Tensor,
+    see_through: torch.Tensor,
+    ground_rgb: list[float],
+) -> torch.Tensor:
+    """Final pixels ``[N, 3]`` with the sky's share swapped for the ground colour, in final-image colours.
+
+    Before post-processing a pixel is ``foreground + see_through * sky_rgb``; post-processing turned ``pre_pp_rgb``
+    into ``rgb``. The sky's share of ``rgb`` is estimated with the pixel's post-processing gain ``rgb / pre_pp_rgb``,
+    then replaced by ``see_through * ground_rgb`` (``see_through`` ``[N, 1]`` is 1 - opacity).
+    """
+    gain = (rgb / pre_pp_rgb.clamp_min(1e-3)).clamp(0.0, 8.0)
+    ground = torch.tensor(ground_rgb, dtype=rgb.dtype, device=rgb.device)
+    return (rgb - gain * see_through * sky_rgb + see_through * ground).clamp(0.0, 1.0)
 
 
 def erode_mask(mask: torch.Tensor, radius_px: int) -> torch.Tensor:

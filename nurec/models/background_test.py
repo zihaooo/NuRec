@@ -13,7 +13,13 @@ from omegaconf import DictConfig
 
 from nurec.config.model import ExtraSignalSkyMlpBackgroundConfig, SkyEnvMapBackgroundConfig
 from nurec.config.trainer import TrainerConfig
-from nurec.models.background import ExtraSignalSkyMlpBackground, SkyEnvMapBackground, erode_mask, ground_fill
+from nurec.models.background import (
+    ExtraSignalSkyMlpBackground,
+    SkyEnvMapBackground,
+    erode_mask,
+    ground_fill,
+    swap_sky_for_ground,
+)
 from nurec.models.background_sampling import sample_cubemap_seamless
 from nurec.utils.geometry import cartesian_to_spherical
 from nurec.utils.misc import unpack_optional
@@ -521,3 +527,14 @@ def test_erode_mask_shrinks_from_unset_pixels_but_not_from_the_border() -> None:
     assert not eroded[3].any()  # the row next to unset pixels is dropped
     assert eroded[4:].all()  # rows below it survive, including those at the image border
     assert torch.equal(erode_mask(mask, 0), mask)
+
+
+def test_swap_sky_for_ground_replaces_only_the_sky_share() -> None:
+    # foreground 0.2, sky 0.6, opacity 0.5: before post-processing 0.2 + 0.5 * 0.6 = 0.5
+    pre = torch.full((1, 3), 0.5)
+    sky = torch.full((1, 3), 0.6)
+    see_through = torch.full((1, 1), 0.5)
+    # identity post-processing: the result is foreground + see-through share of the ground colour
+    assert torch.allclose(swap_sky_for_ground(pre, pre, sky, see_through, [1.0, 1.0, 1.0]), torch.full((1, 3), 0.7))
+    # a post-processing gain of 1.5 scales the removed sky share with it: 0.75 - 1.5 * 0.3 + 0.5 = 0.8
+    assert torch.allclose(swap_sky_for_ground(pre * 1.5, pre, sky, see_through, [1.0, 1.0, 1.0]), torch.full((1, 3), 0.8))
