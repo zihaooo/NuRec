@@ -3316,18 +3316,19 @@ class NCOREDataSource(BaseDataSource, RigTrajectoriesProvider):
 
         groups = list(sampler_groups.values()) if isinstance(sampler_groups, Mapping) else list(sampler_groups)
 
-        def union_mask(sensor_kind: str, n_frames: int) -> npt.NDArray[np.bool_]:
+        def union_mask(sensor_kind: str, n_frames: int, sensor_id: str) -> npt.NDArray[np.bool_]:
             mask = np.zeros(n_frames, dtype=np.bool_)
             for group in groups:
-                mask |= BaseFrameSampler.group_training_frame_mask(group, sensor_kind, n_frames)
+                mask |= BaseFrameSampler.group_training_frame_mask(group, sensor_kind, n_frames, sensor_id=sensor_id)
             return mask
 
         camera_masks = {
-            camera_id: union_mask("camera", len(frame_range))
+            camera_id: union_mask("camera", len(frame_range), camera_id)
             for camera_id, frame_range in self.camera_frame_ranges.items()
         }
         lidar_masks = {
-            lidar_id: union_mask("lidar", len(frame_range)) for lidar_id, frame_range in self.lidar_frame_ranges.items()
+            lidar_id: union_mask("lidar", len(frame_range), lidar_id)
+            for lidar_id, frame_range in self.lidar_frame_ranges.items()
         }
 
         every_frame_reachable = all(bool(m.all()) for m in camera_masks.values()) and all(

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import functools
+import json
+import logging
 
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
@@ -167,6 +169,19 @@ class HoldOutFrameSampler(BaseFrameSampler):
 
 
 _COVERAGE_BASE_SEED = 0
+
+logger = logging.getLogger(__name__)
+
+
+@functools.lru_cache(maxsize=8)
+def _load_include_frames_file(path: str) -> dict[str, tuple[int, ...]]:
+    """Per-sensor training-frame lists for :class:`CoverageFrameSampler` (``include_frames_file``): a JSON object
+    mapping each sensor id (e.g. ``camera_front``) to the LOCAL frame indices (positions in that sensor's
+    ``frame_range``) it may train on. Used to give each spatial cell of a multi-cell reconstruction its own
+    per-camera image set (VastGaussian-style visibility-based camera selection)."""
+    with open(path) as f:
+        raw = json.load(f)
+    return {str(k): tuple(int(i) for i in v) for k, v in raw.items()}
 
 
 @functools.lru_cache(maxsize=16)
@@ -349,7 +364,9 @@ class CoveragePlan:
         per_sensor_frame_idxs: list[npt.NDArray[np.int64]] = []
         for sensor_id in active_ids:
             frame_range = frame_ranges[sensor_id]
-            mask = CoverageFrameSampler.training_frame_mask(frame_sampler_config, n_frames=len(frame_range))
+            mask = CoverageFrameSampler.training_frame_mask(
+                frame_sampler_config, n_frames=len(frame_range), sensor_id=sensor_id
+            )
             frame_idxs = np.asarray(frame_range, dtype=np.int64)[mask]
             assert frame_idxs.shape[0] > 0, (
                 f"CoveragePlan: {sensor_kind} sensor '{sensor_id}' has no training frames over "
@@ -360,6 +377,13 @@ class CoveragePlan:
             per_sensor_frame_idxs.append(frame_idxs)
 
         counts = [int(v.shape[0]) for v in per_sensor_frame_idxs]
+        if frame_sampler_config.get("include_frames_file", None):
+            logger.info(
+                "CoveragePlan (%s, include_frames_file=%s): training frames per sensor %s",
+                sensor_kind,
+                frame_sampler_config.get("include_frames_file"),
+                dict(zip(sensor_ids, counts)),
+            )
         prefix = np.concatenate([np.zeros(1, dtype=np.int64), np.cumsum(counts, dtype=np.int64)])
         return cls(
             sensor_ids=tuple(sensor_ids),
@@ -370,6 +394,9 @@ class CoveragePlan:
 
 
 class CoverageFrameSampler(BaseFrameSampler):
+    # training_frame_mask takes the sensor id (for include_frames_file); see BaseFrameSampler.group_training_frame_mask
+    TRAINING_FRAME_MASK_PER_SENSOR = True
+
     """Coverage-guaranteeing frame sampler, with an OPTIONAL hold-out split.
 
     The uniform / timestamp samplers draw one frame per step i.i.d. (with replacement across steps), so
@@ -383,7 +410,10 @@ class CoverageFrameSampler(BaseFrameSampler):
 
     * with no include/exclude params, cover ALL frames (coverage, no train/val split);
     * with ``include_every_n_frames`` / ``exclude_every_n_frames``, cover only the training
-      subset (coverage + hold-out), using the same partition semantics as :class:`HoldOutFrameSampler`.
+      subset (coverage + hold-out), using the same partition semantics as :class:`HoldOutFrameSampler`;
+    * with ``include_frames_file`` (JSON: sensor id -> local frame indices), additionally restrict each sensor
+      to its listed frames -- a per-sensor image set, e.g. for VastGaussian-style cells. Every consumer of
+      :meth:`training_frame_mask` must then pass the sensor id.
 
     MULTI-SENSOR coverage. The per-sensor "once per pass" property only holds if this sampler is invoked
     on (almost) every step for its sensor. With a random sensor sampler that is NOT true: each sensor is
@@ -454,9 +484,40 @@ class CoverageFrameSampler(BaseFrameSampler):
             )
 
     @classmethod
-    def training_frame_mask(cls, config: DictConfig, n_frames: int) -> npt.NDArray[np.bool_]:
+    def training_frame_mask(
+        cls, config: DictConfig, n_frames: int, sensor_id: str | None = None
+    ) -> npt.NDArray[np.bool_]:
         """Frames this sampler can return for training (mirror of ``sample_frame``): the hold-out
-        training subset if configured, else every frame (coverage over all frames)."""
+        training subset if configured, else every frame (coverage over all frames); with
+        ``include_frames_file``, further restricted to *sensor_id*'s listed frames."""
+        mask = cls._holdout_training_frame_mask(config, n_frames)
+        include_file = config.get("include_frames_file", None)
+        if include_file:
+            if sensor_id is None:
+                raise ValueError(
+                    "CoverageFrameSampler: include_frames_file is set, so training_frame_mask needs the sensor id"
+                )
+            lists = _load_include_frames_file(str(include_file))
+            if sensor_id not in lists:
+                raise KeyError(f"CoverageFrameSampler: sensor '{sensor_id}' is missing from {include_file}")
+            idx = np.asarray(lists[sensor_id], dtype=np.int64)
+            if idx.size and (idx.min() < 0 or idx.max() >= n_frames):
+                raise IndexError(
+                    f"CoverageFrameSampler: {include_file} lists frames outside sensor '{sensor_id}''s range of "
+                    f"{n_frames} frames"
+                )
+            keep = np.zeros(n_frames, dtype=np.bool_)
+            keep[idx] = True
+            mask = mask & keep
+            if not mask.any():
+                raise IndexError(
+                    f"CoverageFrameSampler: no training frame left for sensor '{sensor_id}' after {include_file}"
+                )
+        return mask
+
+    @classmethod
+    def _holdout_training_frame_mask(cls, config: DictConfig, n_frames: int) -> npt.NDArray[np.bool_]:
+        """The hold-out part of :meth:`training_frame_mask`."""
         include_every_n_frames = config.get("include_every_n_frames", None)
         exclude_every_n_frames = config.get("exclude_every_n_frames", None)
         cls._validate_holdout_config(include_every_n_frames, exclude_every_n_frames)
@@ -508,6 +569,10 @@ class CoverageFrameSampler(BaseFrameSampler):
             return FrameSamplerReturn(sampled_frame_idx=decode.frame_idx)
 
         # No shared plan: single-sensor coverage over just this sensor's frame range.
+        if self._holdout_config.get("include_frames_file", None):
+            raise NotImplementedError(
+                "CoverageFrameSampler: include_frames_file needs the multi-sensor coverage plan (sensor ids)"
+            )
         mask = self.training_frame_mask(self._holdout_config, n_frames=len(frame_range))
         frame_idxs = np.asarray(frame_range, dtype=np.int64)[mask]
         assert frame_idxs.shape[0] > 0, (

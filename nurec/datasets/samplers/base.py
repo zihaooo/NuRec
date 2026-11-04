@@ -94,6 +94,8 @@ class BaseFrameSampler(ABC):
     These can be sampled randomly, or biased based on some probability distribution (e.g. error maps)"""
 
     FRAME_SAMPLER_VARIANTS: dict[str, Type[BaseFrameSampler]] = {}
+    # True when training_frame_mask accepts a ``sensor_id`` keyword (per-sensor frame sets)
+    TRAINING_FRAME_MASK_PER_SENSOR = False
 
     @staticmethod
     def register_to_frame_sampler_factory(name: str, cls: Type[BaseFrameSampler]) -> None:
@@ -156,7 +158,9 @@ class BaseFrameSampler(ABC):
         return np.ones(n_frames, dtype=np.bool_)
 
     @staticmethod
-    def group_training_frame_mask(group_config, sensor_kind: str, n_frames: int) -> npt.NDArray[np.bool_]:
+    def group_training_frame_mask(
+        group_config, sensor_kind: str, n_frames: int, sensor_id: str | None = None
+    ) -> npt.NDArray[np.bool_]:
         """Training-frame mask of a batch-sampler group's EFFECTIVE frame sampler.
 
         Mirrors the substitution rules of ``BaseBatchSampler.__init__``:
@@ -188,6 +192,8 @@ class BaseFrameSampler(ABC):
             # a training frame (identity mapping semantics).
             return np.ones(n_frames, dtype=np.bool_)
         sampler_cls = BaseFrameSampler.FRAME_SAMPLER_VARIANTS[name]
+        if sampler_cls.TRAINING_FRAME_MASK_PER_SENSOR:
+            return sampler_cls.training_frame_mask(sampler_config, n_frames, sensor_id=sensor_id)
         return sampler_cls.training_frame_mask(sampler_config, n_frames)
 
     def update_epoch(self, epoch: int, system, **kwargs) -> None:
