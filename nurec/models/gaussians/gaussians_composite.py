@@ -34,7 +34,14 @@ from nurec.config.model import ActiveTileMaskStrategy, ModelConfig, SkipBackgrou
 from nurec.config.trainer import TrainerConfig
 from nurec.datasets.summary import DataSourceSummary
 from nurec.datasets.tracks import CuboidTracks
-from nurec.models.background import BaseBackground, SkyEnvMapBackground
+from nurec.models.background import (
+    BaseBackground,
+    SkyEnvMapBackground,
+    SkyMlpBackground,
+    below_horizon_weight,
+    erode_mask,
+    swap_sky_for_ground,
+)
 from nurec.models.base import BaseModel
 from nurec.models.calib import BaseCalib, FreePoseCalib
 from nurec.models.composite import CompositeModel, LayerTrackIds
@@ -860,6 +867,10 @@ class GaussiansComposite(BaseModel, CompositeModel):
             if lidar_idx_to_id:
                 self._lidar_renderer.set_lidar_idx_to_id(lidar_idx_to_id)
 
+        # unique_sensor_idx -> camera name, for name-keyed camera options such as the sky background's
+        # per-camera ground fill (frame metadata carries only the index for NCORE data)
+        self._camera_idx_to_name = self._resolve_camera_idx_to_name(datasource)
+
         # Dedicated CUDA stream for lidar rendering (camera uses the current/default
         # stream). Created lazily in _resolve_lidar_stream so the canonical owner can be
         # the per-request context (see Backend._lidar_stream, which is threaded into
@@ -933,6 +944,29 @@ class GaussiansComposite(BaseModel, CompositeModel):
 
         self._apply_component_only_freeze()
         self._log_component_inventory()
+
+    @staticmethod
+    def _resolve_camera_idx_to_name(datasource: DataSourceSummary) -> dict[int, str]:
+        """``unique_sensor_idx -> camera name``, from the same two sources as ``_resolve_lidar_idx_to_id``.
+
+        The live NCORE datasource's ``camera_unique_ids`` ({camera_id: (id, idx)}) at training time, else the
+        serialized ``state.rig_trajectories.camera_calibrations``. Empty when neither is available.
+        """
+        underlying_datasource = getattr(datasource, "datasource", None)
+        camera_unique_ids = getattr(underlying_datasource, "camera_unique_ids", None)
+        if camera_unique_ids is not None:
+            return {uid.idx: camera_id for camera_id, uid in camera_unique_ids.items()}
+
+        rig_trajectories = getattr(getattr(datasource, "state", None), "rig_trajectories", None)
+        camera_calibrations = getattr(rig_trajectories, "camera_calibrations", None)
+        if camera_calibrations is not None:
+            return {
+                int(calibration.unique_sensor_idx): calibration.logical_sensor_name
+                for calibration in camera_calibrations.values()
+                if calibration.unique_sensor_idx >= 0
+            }
+
+        return {}
 
     @staticmethod
     def _resolve_lidar_idx_to_id(datasource: DataSourceSummary) -> dict[int, str]:
@@ -3565,6 +3599,17 @@ class GaussiansComposite(BaseModel, CompositeModel):
                     else:
                         out.rendered_cam.rgb[inactive] = 0.0
 
+        # The ground fill (applied after post-processing) needs the image as it was before post-processing.
+        ground_fill_pre_pp_rgb = (
+            out.rendered_cam.rgb.detach().clone()
+            if render_background
+            and not is_training_batch
+            and self._ground_fill_configured()
+            and out.rendered_cam is not None
+            and out.rendered_cam.rgb is not None
+            else None
+        )
+
         # Apply post-processing. We assume single image for post-processing. And only for camera for now.
         if (
             enable_pp
@@ -3606,10 +3651,78 @@ class GaussiansComposite(BaseModel, CompositeModel):
                         global_step=global_step,
                     )
 
+        if ground_fill_pre_pp_rgb is not None:
+            self._maybe_apply_ground_fill(batch, out, ground_fill_pre_pp_rgb)
+
         if clamp_output:
             self._maybe_saturate_rgb(out)
 
         return out
+
+    def _ground_fill_configured(self) -> bool:
+        """Whether the sky background has a ground-fill colour set (``SkyMlpBackgroundConfig.ground_fill_*``)."""
+        background = self.background
+        if not isinstance(background, SkyMlpBackground):
+            return False
+        cfg = background.config
+        return cfg.ground_fill_rgb is not None or bool(cfg.ground_fill_rgb_per_camera)
+
+    def _maybe_apply_ground_fill(
+        self, batch: DataAndRenderingBatch, out: GaussiansCompositeReturn, pre_pp_rgb: torch.Tensor
+    ) -> None:
+        """The sky background's render-time ground fill (``SkyMlpBackgroundConfig.ground_fill_*``).
+
+        Applied to the final image, after post-processing, so post-processing (PPISP's controller predicts each frame's
+        exposure and colour from the render) sees the unfilled render, and in final-image colours, the space the
+        ground colours are sampled from photos in. In each filled pixel the sky's share, (1 - opacity) * sky colour,
+        is swapped for (1 - opacity) * ground colour; the sky's share after post-processing is estimated with that
+        pixel's post-processing gain (final / ``pre_pp_rgb``, the image before post-processing). A no-op unless a
+        ground colour is set for this camera.
+        """
+        background = self.background
+        if not isinstance(background, SkyMlpBackground):
+            return
+        cfg = background.config
+        rendering_camera = batch.rendering.camera if batch.rendering is not None else None
+        rendered = out.rendered_cam
+        if rendering_camera is None or rendered is None or rendered.rgb is None or rendered.opacity is None:
+            return
+        data_camera = batch.data.camera
+        meta = data_camera.meta[0] if data_camera is not None and data_camera.meta else None
+        camera_name = (
+            self._camera_idx_to_name.get(int(meta.unique_sensor_idx), meta.logical_sensor_id) if meta is not None else None
+        )
+        ground_rgb = (cfg.ground_fill_rgb_per_camera or {}).get(camera_name or "", cfg.ground_fill_rgb)
+        if ground_rgb is None:
+            return
+        rgb = rendered.rgb.reshape(-1, 3)
+        see_through = (1.0 - rendered.opacity.reshape(-1, 1).to(rgb.dtype)).clamp(0.0, 1.0)
+        if see_through.shape[0] != rgb.shape[0]:
+            return
+        rays_d = rendering_camera.rays[..., 3:].reshape(-1, 3)
+        weight = below_horizon_weight(
+            rays_d, cfg.ground_fill_up, cfg.ground_fill_horizon_deg, cfg.ground_fill_blend_deg
+        ).to(rgb.dtype)
+        if cfg.ground_fill_masked_only:
+            # pixels the dataset marks invalid (the ego hood), shrunk so the fill stays inside narrower metric masks
+            if data_camera is None or data_camera.labels.flags is None:
+                return
+            invalid = data_camera.labels.get_mask_flags_any(RayFlags.INVALID)
+            if invalid.numel() != rgb.shape[0]:
+                return
+            invalid = erode_mask(invalid.reshape(rendering_camera.h, rendering_camera.w), cfg.ground_fill_mask_erode_px)
+            weight = weight * invalid.reshape(-1).to(device=weight.device, dtype=weight.dtype)
+        extra = rendered.extra_ray_signals
+        sky = extra.rgb_background if extra is not None else None
+        if sky is not None and sky.numel() == rgb.numel() and not background.composite_in_linear_space:
+            target = swap_sky_for_ground(
+                rgb, pre_pp_rgb.reshape(-1, 3).to(rgb.dtype), sky.reshape(-1, 3).to(rgb.dtype), see_through, ground_rgb
+            )
+        else:  # no stored sky colour: move the pixel towards the ground colour by its see-through share
+            ground = torch.tensor(ground_rgb, dtype=rgb.dtype, device=rgb.device)
+            target = torch.lerp(rgb, ground.expand_as(rgb), see_through)
+        filled = torch.lerp(rgb, target, weight[:, None])
+        rendered.rgb = filled.reshape(rendered.rgb.shape)
 
     def _maybe_saturate_rgb(self, out: GaussiansCompositeReturn) -> None:
         if out.rendered_cam is not None and out.rendered_cam.rgb is not None and self.saturate_radiance:

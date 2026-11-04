@@ -137,6 +137,23 @@ class SkyMlpBackgroundConfig(BaseBackgroundConfig):
     seed: int
     saturate_radiance: bool = True
 
+    # Ground fill, a render-time option that training never uses: rays pointing below the horizon see ground, not
+    # sky, so the MLP's colour there is a guess that shows wherever the Gaussians are see-through (holes under the
+    # ego hood). With a colour set, evaluation and validation renders move those pixels towards it by their
+    # see-through share, on the final image after post-processing (GaussiansComposite._maybe_apply_ground_fill).
+    ground_fill_rgb: list[float] | None = None  # RGB in [0, 1] in final-image colours, e.g. sampled from photos
+    ground_fill_rgb_per_camera: dict[str, list[float]] | None = None  # by camera (logical sensor) name; overrides
+    ground_fill_up: list[float] = [0.0, 0.0, 1.0]  # world up axis
+    ground_fill_horizon_deg: float = 0.0  # rays at or above this elevation keep their colour ...
+    ground_fill_blend_deg: float = Field(default=1.0, gt=0.0)  # ... below it the ground colour fades in over this
+    # Fill only pixels the dataset marks invalid (the ego hood and other masked pixels, which metrics skip). The sky
+    # MLP also draws part of see-through road, lane markings above all, so filling every ground ray changes scored
+    # pixels: -0.2 dB held-out on a camera-only mcity run. Without a ray mask nothing is filled.
+    ground_fill_masked_only: bool = True
+    # Shrink that mask by this many pixels first, so the fill stays inside a narrower mask an external scorer uses
+    # (mcity: NuRec's ego mask is ~15 px wider than the scorer's hood mask at 960x600; use 16).
+    ground_fill_mask_erode_px: int = Field(default=0, ge=0)
+
 
 class ExtraSignalSkyMlpBackgroundConfig(SkyMlpBackgroundConfig):
     """Sky MLP with extra signal support."""
