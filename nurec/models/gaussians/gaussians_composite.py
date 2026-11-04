@@ -34,7 +34,7 @@ from nurec.config.model import ActiveTileMaskStrategy, ModelConfig, SkipBackgrou
 from nurec.config.trainer import TrainerConfig
 from nurec.datasets.summary import DataSourceSummary
 from nurec.datasets.tracks import CuboidTracks
-from nurec.models.background import BaseBackground, SkyEnvMapBackground, SkyMlpBackground
+from nurec.models.background import BaseBackground, SkyEnvMapBackground, SkyMlpBackground, erode_mask, ground_fill
 from nurec.models.base import BaseModel
 from nurec.models.calib import BaseCalib, FreePoseCalib
 from nurec.models.composite import CompositeModel, LayerTrackIds
@@ -3543,21 +3543,6 @@ class GaussiansComposite(BaseModel, CompositeModel):
                         texture_update_mask=texture_update_mask,
                     )
                 else:
-                    if isinstance(self.background, SkyMlpBackground):
-                        # the ground fill picks its colour by camera name; a rendered batch holds one camera
-                        data_camera = batch.data.camera
-                        meta = data_camera.meta[0] if data_camera is not None and data_camera.meta else None
-                        self.background.ground_fill_camera = (
-                            self._camera_idx_to_name.get(int(meta.unique_sensor_idx), meta.logical_sensor_id)
-                            if meta is not None
-                            else None
-                        )
-                        # rays the dataset marks invalid (the ego hood): where ground_fill_masked_only fills
-                        self.background.ground_fill_ray_mask = (
-                            data_camera.labels.get_mask_flags_any(RayFlags.INVALID).reshape(-1)
-                            if data_camera is not None and data_camera.labels.flags is not None
-                            else None
-                        )
                     self.background(background_rays_d.reshape(-1, 3), out, is_training_batch)
 
         # Inactive-tile contract: pixels covered by an inactive tile are deliberately forced to
@@ -3648,10 +3633,62 @@ class GaussiansComposite(BaseModel, CompositeModel):
                         global_step=global_step,
                     )
 
+        if render_background and not is_training_batch:
+            self._maybe_apply_ground_fill(batch, out)
+
         if clamp_output:
             self._maybe_saturate_rgb(out)
 
         return out
+
+    def _maybe_apply_ground_fill(self, batch: DataAndRenderingBatch, out: GaussiansCompositeReturn) -> None:
+        """The sky background's render-time ground fill (``SkyMlpBackgroundConfig.ground_fill_*``).
+
+        Applied to the final image, after post-processing, so post-processing (PPISP's controller predicts each frame's
+        exposure and colour from the render) sees the unfilled render, and in final-image colours, the space the
+        ground colours are sampled from photos in. Each pixel moves towards the ground colour by its see-through share
+        (1 - opacity), the part the sky drew. A no-op unless a ground colour is set for this camera.
+        """
+        background = self.background
+        if not isinstance(background, SkyMlpBackground):
+            return
+        cfg = background.config
+        rendering_camera = batch.rendering.camera if batch.rendering is not None else None
+        rendered = out.rendered_cam
+        if rendering_camera is None or rendered is None or rendered.rgb is None or rendered.opacity is None:
+            return
+        data_camera = batch.data.camera
+        meta = data_camera.meta[0] if data_camera is not None and data_camera.meta else None
+        camera_name = (
+            self._camera_idx_to_name.get(int(meta.unique_sensor_idx), meta.logical_sensor_id) if meta is not None else None
+        )
+        ground_rgb = (cfg.ground_fill_rgb_per_camera or {}).get(camera_name or "", cfg.ground_fill_rgb)
+        if ground_rgb is None:
+            return
+        rgb = rendered.rgb.reshape(-1, 3)
+        weight = (1.0 - rendered.opacity.reshape(-1).float()).clamp(0.0, 1.0)
+        if weight.numel() != rgb.shape[0]:
+            return
+        if cfg.ground_fill_masked_only:
+            # pixels the dataset marks invalid (the ego hood), shrunk so the fill stays inside narrower metric masks
+            if data_camera is None or data_camera.labels.flags is None:
+                return
+            invalid = data_camera.labels.get_mask_flags_any(RayFlags.INVALID)
+            if invalid.numel() != rgb.shape[0]:
+                return
+            invalid = erode_mask(invalid.reshape(rendering_camera.h, rendering_camera.w), cfg.ground_fill_mask_erode_px)
+            weight = weight * invalid.reshape(-1).to(device=weight.device, dtype=weight.dtype)
+        rays_d = rendering_camera.rays[..., 3:].reshape(-1, 3)
+        filled = ground_fill(
+            rays_d,
+            rgb,
+            ground_rgb,
+            cfg.ground_fill_up,
+            cfg.ground_fill_horizon_deg,
+            cfg.ground_fill_blend_deg,
+            weight,
+        )
+        rendered.rgb = filled.reshape(rendered.rgb.shape)
 
     def _maybe_saturate_rgb(self, out: GaussiansCompositeReturn) -> None:
         if out.rendered_cam is not None and out.rendered_cam.rgb is not None and self.saturate_radiance:

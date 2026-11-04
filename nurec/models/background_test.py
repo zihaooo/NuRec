@@ -13,7 +13,7 @@ from omegaconf import DictConfig
 
 from nurec.config.model import ExtraSignalSkyMlpBackgroundConfig, SkyEnvMapBackgroundConfig
 from nurec.config.trainer import TrainerConfig
-from nurec.models.background import ExtraSignalSkyMlpBackground, SkyEnvMapBackground, ground_fill
+from nurec.models.background import ExtraSignalSkyMlpBackground, SkyEnvMapBackground, erode_mask, ground_fill
 from nurec.models.background_sampling import sample_cubemap_seamless
 from nurec.utils.geometry import cartesian_to_spherical
 from nurec.utils.misc import unpack_optional
@@ -505,3 +505,19 @@ def test_ground_fill_with_a_mask_changes_only_masked_rays() -> None:
     out = ground_fill(rays_d, torch.zeros(2, 3), [1.0, 1.0, 1.0], up=[0.0, 0.0, 1.0], horizon_deg=0.0, blend_deg=1.0,
                       mask=torch.tensor([True, False]))
     assert torch.equal(out, torch.tensor([[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]]))
+
+
+def test_ground_fill_weight_scales_the_fill() -> None:
+    # a fractional weight (the pixel's see-through share) moves the colour only that far
+    out = ground_fill(torch.tensor([[0.0, 0.0, -1.0]]), torch.zeros(1, 3), [1.0, 1.0, 1.0], up=[0.0, 0.0, 1.0],
+                      horizon_deg=0.0, blend_deg=1.0, mask=torch.tensor([0.25]))
+    assert torch.allclose(out, torch.full((1, 3), 0.25))
+
+
+def test_erode_mask_shrinks_from_unset_pixels_but_not_from_the_border() -> None:
+    mask = torch.zeros(6, 6, dtype=torch.bool)
+    mask[3:, :] = True  # a hood along the bottom edge
+    eroded = erode_mask(mask, 1)
+    assert not eroded[3].any()  # the row next to unset pixels is dropped
+    assert eroded[4:].all()  # rows below it survive, including those at the image border
+    assert torch.equal(erode_mask(mask, 0), mask)

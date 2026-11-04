@@ -425,11 +425,12 @@ def ground_fill(
     blend_deg: float,
     mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Blend ``background_rgb`` ``[N, 3]`` towards ``ground_rgb`` for world rays ``[N, 3]`` pointing below the horizon.
+    """Blend ``rgb`` ``[N, 3]`` (named ``background_rgb``) towards ``ground_rgb`` for world rays ``[N, 3]`` below the horizon.
 
-    Rays at or above elevation ``horizon_deg`` (relative to ``up``'s horizontal plane) keep the sky colour. Below it
+    Rays at or above elevation ``horizon_deg`` (relative to ``up``'s horizontal plane) keep their colour. Below it
     the ground weight rises linearly and reaches 1 at ``horizon_deg - blend_deg``, so no hard line shows where sky
-    meets ground fill and nothing above the horizon changes. With a boolean ``mask`` ``[N]``, only those rays change.
+    meets ground fill and nothing above the horizon changes. ``mask`` ``[N]`` (boolean, or a weight in [0, 1])
+    multiplies the weight, e.g. to fill only masked pixels, and only the see-through part of each.
     """
     up_t = torch.tensor(up, dtype=rays_d.dtype, device=rays_d.device)
     up_t = up_t / up_t.norm()
@@ -438,8 +439,20 @@ def ground_fill(
     weight = ((horizon_deg - elevation_deg) / blend_deg).clamp(0.0, 1.0)[:, None]
     if mask is not None:
         weight = weight * mask.reshape(-1, 1).to(device=weight.device, dtype=weight.dtype)
-    ground =torch.tensor(ground_rgb, dtype=background_rgb.dtype, device=background_rgb.device).expand_as(background_rgb)
+    ground = torch.tensor(ground_rgb, dtype=background_rgb.dtype, device=background_rgb.device).expand_as(background_rgb)
     return torch.lerp(background_rgb, ground, weight.to(background_rgb.dtype))
+
+
+def erode_mask(mask: torch.Tensor, radius_px: int) -> torch.Tensor:
+    """Shrink a boolean ``[H, W]`` mask: a pixel stays set only if every pixel within ``radius_px`` (square) is set.
+
+    Pixels beyond the image border count as set, so a mask touching the border (an ego hood) is not eaten from there.
+    """
+    if radius_px <= 0:
+        return mask
+    unset = (~mask).to(torch.float32)[None, None]
+    grown = torch.nn.functional.max_pool2d(unset, kernel_size=2 * radius_px + 1, stride=1, padding=radius_px)
+    return ~(grown[0, 0] > 0)
 
 
 class SkyMlpBackground(BaseBackground):
@@ -447,11 +460,6 @@ class SkyMlpBackground(BaseBackground):
 
     def __init__(self, config: SkyMlpBackgroundConfig, trainer_config: TrainerConfig):
         super().__init__(config, trainer_config)
-        # Set by GaussiansComposite before each call: the logical name of the camera being rendered, so the ground
-        # fill can pick that camera's colour (ground_fill_rgb_per_camera), and the rays the dataset marks invalid
-        # (ground_fill_masked_only).
-        self.ground_fill_camera: Optional[str] = None
-        self.ground_fill_ray_mask: Optional[torch.Tensor] = None
 
         self.dir_encoding = tcnn.Encoding(
             n_input_dims=3,
@@ -477,33 +485,10 @@ class SkyMlpBackground(BaseBackground):
     ) -> None:
         dir_encoding = self.dir_encoding((rays_d.reshape(-1, 3) + 1) / 2)  # rays_d assumed to be normalized
         background_rgb = eval_tcnn_network(self.sky_mlp, dir_encoding).float()
-        if not is_training:
-            background_rgb = self.apply_ground_fill(rays_d.reshape(-1, 3), background_rgb)
 
         self.combine_rgb_colors(results, background_rgb)
 
     __call__ = module_call_type(forward)
-
-    def apply_ground_fill(self, rays_d: torch.Tensor, background_rgb: torch.Tensor) -> torch.Tensor:
-        """The ground fill for the current camera (see ``SkyMlpBackgroundConfig``); a no-op when no colour is set."""
-        per_camera = self.config.ground_fill_rgb_per_camera or {}
-        ground_rgb = per_camera.get(self.ground_fill_camera or "", self.config.ground_fill_rgb)
-        if ground_rgb is None:
-            return background_rgb
-        mask = None
-        if self.config.ground_fill_masked_only:
-            mask = self.ground_fill_ray_mask
-            if mask is None or mask.numel() != rays_d.shape[0]:
-                return background_rgb  # no usable mask: leave every pixel as rendered
-        return ground_fill(
-            rays_d,
-            background_rgb,
-            ground_rgb,
-            self.config.ground_fill_up,
-            self.config.ground_fill_horizon_deg,
-            self.config.ground_fill_blend_deg,
-            mask,
-        )
 
 
 class ExtraSignalSkyMlpBackground(SkyMlpBackground):
