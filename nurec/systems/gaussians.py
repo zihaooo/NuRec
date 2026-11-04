@@ -307,7 +307,8 @@ class GaussiansSystem(BaseSystemSO):
         self._validate_training_harmonizer_component_only_compatibility()
         self._validate_component_only_loss_normalization_compatibility()
         self._register_serialization_state_dict_hook()
-        self._apply_init_parts()
+        if stage == "fit":
+            self._apply_init_parts()
 
         # TODO: Move the metric managers to BaseSystemSO
         # Training PSNR is logged immediately and is never aggregated or exported.
@@ -530,9 +531,11 @@ class GaussiansSystem(BaseSystemSO):
     def _apply_init_parts(self) -> None:
         """system.init_parts: copy parameters from another checkpoint and freeze some (once per system).
 
-        Runs in setup, after the model is built and before Lightning restores any resume checkpoint, so a resumed
-        checkpoint still overwrites the copied values (frozen flags stay). Fails loudly on a missing key or shape
-        mismatch rather than training with a silently different model."""
+        Runs in setup for training only (stage "fit"), after the model is built and before Lightning restores any resume
+        checkpoint, so a resumed checkpoint still overwrites the copied values (frozen flags stay). Validation and
+        rendering restore everything from their checkpoint and skip it: there, lazy Gaussian layers are not
+        materialized at setup. Fails loudly on a missing key or shape mismatch rather than training with a silently
+        different model."""
         cfg = getattr(self.cached_config.system, "init_parts", None)
         if cfg is None or getattr(self, "_init_parts_applied", False):
             return
@@ -540,8 +543,13 @@ class GaussiansSystem(BaseSystemSO):
         if cfg.load:
             ckpt = torch.load(cfg.checkpoint, map_location="cpu", weights_only=False)
             src = ckpt["state_dict"]
-            own = self.state_dict()
             picked = {k: v for k, v in src.items() if any(k.startswith(p) for p in cfg.load)}
+            # only the selected tensors: a full state_dict() would touch uninitialized (lazy) parameters
+            own = {
+                k: v
+                for k, v in list(self.named_parameters()) + list(self.named_buffers())
+                if any(k.startswith(p) for p in cfg.load)
+            }
             if not picked:
                 raise ValueError(f"init_parts: no key of {cfg.checkpoint} starts with {cfg.load}")
             for k, v in picked.items():
