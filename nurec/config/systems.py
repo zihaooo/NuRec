@@ -112,7 +112,22 @@ class BaseSystemConfig(BaseConfigSchema):
     optimizers: Optional[list[Any]] = None
 
 
+class InitPartsConfig(BaseConfigSchema):
+    """Copy selected parameters from another checkpoint before training and optionally freeze them -- e.g. a coarse
+    global model's sky and PPISP per-camera parameters, shared by every cell of a multi-cell reconstruction."""
+
+    checkpoint: str = Field(description="NuRec checkpoint to copy from")
+    load: list[str] = Field(
+        default_factory=list, description="state_dict key prefixes to copy (every key must exist with the same shape)"
+    )
+    freeze: list[str] = Field(default_factory=list, description="parameter name prefixes set to requires_grad=False")
+
+
 class BaseGaussiansSystemConfig(BaseSystemConfig):
+    init_parts: Optional[InitPartsConfig] = Field(
+        default=None,
+        description="Copy (and optionally freeze) parameters from another checkpoint at setup, before any resume.",
+    )
     scheduler: Optional[Any] = Field(
         default=None,
         description="Examples: SequentialLR, ChainedScheduler",

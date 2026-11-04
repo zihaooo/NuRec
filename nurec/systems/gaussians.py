@@ -307,6 +307,7 @@ class GaussiansSystem(BaseSystemSO):
         self._validate_training_harmonizer_component_only_compatibility()
         self._validate_component_only_loss_normalization_compatibility()
         self._register_serialization_state_dict_hook()
+        self._apply_init_parts()
 
         # TODO: Move the metric managers to BaseSystemSO
         # Training PSNR is logged immediately and is never aggregated or exported.
@@ -525,6 +526,41 @@ class GaussiansSystem(BaseSystemSO):
         criterion = self.criterions["lpips"]
         assert isinstance(criterion, LearnedPerceptualImagePatchSimilarity)
         return criterion
+
+    def _apply_init_parts(self) -> None:
+        """system.init_parts: copy parameters from another checkpoint and freeze some (once per system).
+
+        Runs in setup, after the model is built and before Lightning restores any resume checkpoint, so a resumed
+        checkpoint still overwrites the copied values (frozen flags stay). Fails loudly on a missing key or shape
+        mismatch rather than training with a silently different model."""
+        cfg = getattr(self.cached_config.system, "init_parts", None)
+        if cfg is None or getattr(self, "_init_parts_applied", False):
+            return
+        self._init_parts_applied = True
+        if cfg.load:
+            ckpt = torch.load(cfg.checkpoint, map_location="cpu", weights_only=False)
+            src = ckpt["state_dict"]
+            own = self.state_dict()
+            picked = {k: v for k, v in src.items() if any(k.startswith(p) for p in cfg.load)}
+            if not picked:
+                raise ValueError(f"init_parts: no key of {cfg.checkpoint} starts with {cfg.load}")
+            for k, v in picked.items():
+                if k not in own:
+                    raise KeyError(f"init_parts: {k} is not in this model")
+                if torch.is_tensor(v) and tuple(own[k].shape) != tuple(v.shape):
+                    raise ValueError(f"init_parts: {k} has shape {tuple(v.shape)}, this model {tuple(own[k].shape)}")
+            self.load_state_dict(picked, strict=False)
+            log.info("init_parts: copied %d tensors from %s: %s", len(picked), cfg.checkpoint, sorted(picked))
+            del ckpt
+        frozen = []
+        for name, param in self.named_parameters():
+            if any(name.startswith(p) for p in cfg.freeze):
+                param.requires_grad_(False)
+                frozen.append(name)
+        if cfg.freeze and not frozen:
+            raise ValueError(f"init_parts: no parameter starts with {cfg.freeze}")
+        if frozen:
+            log.info("init_parts: froze %d parameters: %s", len(frozen), frozen)
 
     def on_fit_start(self) -> None:
         super().on_fit_start()
