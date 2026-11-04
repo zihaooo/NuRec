@@ -34,7 +34,7 @@ from nurec.config.model import ActiveTileMaskStrategy, ModelConfig, SkipBackgrou
 from nurec.config.trainer import TrainerConfig
 from nurec.datasets.summary import DataSourceSummary
 from nurec.datasets.tracks import CuboidTracks
-from nurec.models.background import BaseBackground, SkyEnvMapBackground
+from nurec.models.background import BaseBackground, SkyEnvMapBackground, SkyMlpBackground
 from nurec.models.base import BaseModel
 from nurec.models.calib import BaseCalib, FreePoseCalib
 from nurec.models.composite import CompositeModel, LayerTrackIds
@@ -860,6 +860,10 @@ class GaussiansComposite(BaseModel, CompositeModel):
             if lidar_idx_to_id:
                 self._lidar_renderer.set_lidar_idx_to_id(lidar_idx_to_id)
 
+        # unique_sensor_idx -> camera name, for name-keyed camera options such as the sky background's
+        # per-camera ground fill (frame metadata carries only the index for NCORE data)
+        self._camera_idx_to_name = self._resolve_camera_idx_to_name(datasource)
+
         # Dedicated CUDA stream for lidar rendering (camera uses the current/default
         # stream). Created lazily in _resolve_lidar_stream so the canonical owner can be
         # the per-request context (see Backend._lidar_stream, which is threaded into
@@ -933,6 +937,29 @@ class GaussiansComposite(BaseModel, CompositeModel):
 
         self._apply_component_only_freeze()
         self._log_component_inventory()
+
+    @staticmethod
+    def _resolve_camera_idx_to_name(datasource: DataSourceSummary) -> dict[int, str]:
+        """``unique_sensor_idx -> camera name``, from the same two sources as ``_resolve_lidar_idx_to_id``.
+
+        The live NCORE datasource's ``camera_unique_ids`` ({camera_id: (id, idx)}) at training time, else the
+        serialized ``state.rig_trajectories.camera_calibrations``. Empty when neither is available.
+        """
+        underlying_datasource = getattr(datasource, "datasource", None)
+        camera_unique_ids = getattr(underlying_datasource, "camera_unique_ids", None)
+        if camera_unique_ids is not None:
+            return {uid.idx: camera_id for camera_id, uid in camera_unique_ids.items()}
+
+        rig_trajectories = getattr(getattr(datasource, "state", None), "rig_trajectories", None)
+        camera_calibrations = getattr(rig_trajectories, "camera_calibrations", None)
+        if camera_calibrations is not None:
+            return {
+                int(calibration.unique_sensor_idx): calibration.logical_sensor_name
+                for calibration in camera_calibrations.values()
+                if calibration.unique_sensor_idx >= 0
+            }
+
+        return {}
 
     @staticmethod
     def _resolve_lidar_idx_to_id(datasource: DataSourceSummary) -> dict[int, str]:
@@ -3516,6 +3543,21 @@ class GaussiansComposite(BaseModel, CompositeModel):
                         texture_update_mask=texture_update_mask,
                     )
                 else:
+                    if isinstance(self.background, SkyMlpBackground):
+                        # the ground fill picks its colour by camera name; a rendered batch holds one camera
+                        data_camera = batch.data.camera
+                        meta = data_camera.meta[0] if data_camera is not None and data_camera.meta else None
+                        self.background.ground_fill_camera = (
+                            self._camera_idx_to_name.get(int(meta.unique_sensor_idx), meta.logical_sensor_id)
+                            if meta is not None
+                            else None
+                        )
+                        # rays the dataset marks invalid (the ego hood): where ground_fill_masked_only fills
+                        self.background.ground_fill_ray_mask = (
+                            data_camera.labels.get_mask_flags_any(RayFlags.INVALID).reshape(-1)
+                            if data_camera is not None and data_camera.labels.flags is not None
+                            else None
+                        )
                     self.background(background_rays_d.reshape(-1, 3), out, is_training_batch)
 
         # Inactive-tile contract: pixels covered by an inactive tile are deliberately forced to

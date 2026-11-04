@@ -416,11 +416,42 @@ class SkyEnvMapBackground(BaseBackground, GsplatEnvMapBackground):  # type: igno
     __call__ = module_call_type(forward)
 
 
+def ground_fill(
+    rays_d: torch.Tensor,
+    background_rgb: torch.Tensor,
+    ground_rgb: list[float],
+    up: list[float],
+    horizon_deg: float,
+    blend_deg: float,
+    mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Blend ``background_rgb`` ``[N, 3]`` towards ``ground_rgb`` for world rays ``[N, 3]`` pointing below the horizon.
+
+    Rays at or above elevation ``horizon_deg`` (relative to ``up``'s horizontal plane) keep the sky colour. Below it
+    the ground weight rises linearly and reaches 1 at ``horizon_deg - blend_deg``, so no hard line shows where sky
+    meets ground fill and nothing above the horizon changes. With a boolean ``mask`` ``[N]``, only those rays change.
+    """
+    up_t = torch.tensor(up, dtype=rays_d.dtype, device=rays_d.device)
+    up_t = up_t / up_t.norm()
+    sin_elevation = (rays_d @ up_t) / rays_d.norm(dim=-1).clamp_min(1e-12)
+    elevation_deg = torch.rad2deg(torch.asin(sin_elevation.clamp(-1.0, 1.0)))
+    weight = ((horizon_deg - elevation_deg) / blend_deg).clamp(0.0, 1.0)[:, None]
+    if mask is not None:
+        weight = weight * mask.reshape(-1, 1).to(device=weight.device, dtype=weight.dtype)
+    ground =torch.tensor(ground_rgb, dtype=background_rgb.dtype, device=background_rgb.device).expand_as(background_rgb)
+    return torch.lerp(background_rgb, ground, weight.to(background_rgb.dtype))
+
+
 class SkyMlpBackground(BaseBackground):
     config: SkyMlpBackgroundConfig  # narrow from BaseBackgroundConfig
 
     def __init__(self, config: SkyMlpBackgroundConfig, trainer_config: TrainerConfig):
         super().__init__(config, trainer_config)
+        # Set by GaussiansComposite before each call: the logical name of the camera being rendered, so the ground
+        # fill can pick that camera's colour (ground_fill_rgb_per_camera), and the rays the dataset marks invalid
+        # (ground_fill_masked_only).
+        self.ground_fill_camera: Optional[str] = None
+        self.ground_fill_ray_mask: Optional[torch.Tensor] = None
 
         self.dir_encoding = tcnn.Encoding(
             n_input_dims=3,
@@ -446,10 +477,33 @@ class SkyMlpBackground(BaseBackground):
     ) -> None:
         dir_encoding = self.dir_encoding((rays_d.reshape(-1, 3) + 1) / 2)  # rays_d assumed to be normalized
         background_rgb = eval_tcnn_network(self.sky_mlp, dir_encoding).float()
+        if not is_training:
+            background_rgb = self.apply_ground_fill(rays_d.reshape(-1, 3), background_rgb)
 
         self.combine_rgb_colors(results, background_rgb)
 
     __call__ = module_call_type(forward)
+
+    def apply_ground_fill(self, rays_d: torch.Tensor, background_rgb: torch.Tensor) -> torch.Tensor:
+        """The ground fill for the current camera (see ``SkyMlpBackgroundConfig``); a no-op when no colour is set."""
+        per_camera = self.config.ground_fill_rgb_per_camera or {}
+        ground_rgb = per_camera.get(self.ground_fill_camera or "", self.config.ground_fill_rgb)
+        if ground_rgb is None:
+            return background_rgb
+        mask = None
+        if self.config.ground_fill_masked_only:
+            mask = self.ground_fill_ray_mask
+            if mask is None or mask.numel() != rays_d.shape[0]:
+                return background_rgb  # no usable mask: leave every pixel as rendered
+        return ground_fill(
+            rays_d,
+            background_rgb,
+            ground_rgb,
+            self.config.ground_fill_up,
+            self.config.ground_fill_horizon_deg,
+            self.config.ground_fill_blend_deg,
+            mask,
+        )
 
 
 class ExtraSignalSkyMlpBackground(SkyMlpBackground):

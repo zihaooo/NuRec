@@ -13,7 +13,7 @@ from omegaconf import DictConfig
 
 from nurec.config.model import ExtraSignalSkyMlpBackgroundConfig, SkyEnvMapBackgroundConfig
 from nurec.config.trainer import TrainerConfig
-from nurec.models.background import ExtraSignalSkyMlpBackground, SkyEnvMapBackground
+from nurec.models.background import ExtraSignalSkyMlpBackground, SkyEnvMapBackground, ground_fill
 from nurec.models.background_sampling import sample_cubemap_seamless
 from nurec.utils.geometry import cartesian_to_spherical
 from nurec.utils.misc import unpack_optional
@@ -478,3 +478,30 @@ def test_extra_signal_sky_mlp_background_adds_to_semantic_logits_during_training
     semantic_logits_after = extras_after.semantic_logits
     assert semantic_logits_after is not None
     assert not torch.equal(semantic_logits_after, initial)
+
+
+def test_ground_fill_replaces_only_rays_below_the_horizon() -> None:
+    # elevations 45, 0, -0.5, -1, -45 and -90 degrees about +z
+    rays_d = torch.tensor([[1.0, 0.0, 1.0], [1.0, 0.0, 0.0], [1.0, 0.0, -0.0087268], [1.0, 0.0, -0.0174551],
+                           [1.0, 0.0, -1.0], [0.0, 0.0, -1.0]])
+    sky = torch.full((6, 3), 0.25)
+    out = ground_fill(rays_d, sky, [0.75, 0.5, 0.5], up=[0.0, 0.0, 1.0], horizon_deg=0.0, blend_deg=1.0)
+    weight = (out[:, 0] - 0.25) / 0.5
+    assert torch.allclose(weight, torch.tensor([0.0, 0.0, 0.5, 1.0, 1.0, 1.0]), atol=1e-3)
+    assert torch.equal(out[:2], sky[:2])  # the sky at and above the horizon is untouched
+    assert torch.allclose(out[3:], torch.tensor([0.75, 0.5, 0.5]).expand(3, 3))
+
+
+def test_ground_fill_follows_the_up_axis_and_unnormalised_rays() -> None:
+    # with y as up, a ray pointing down y is ground and one along z is the horizon
+    rays_d = torch.tensor([[0.0, -3.0, 0.0], [0.0, 0.0, 2.0]])
+    out = ground_fill(rays_d, torch.zeros(2, 3), [1.0, 1.0, 1.0], up=[0.0, 2.0, 0.0], horizon_deg=0.0, blend_deg=1.0)
+    assert torch.allclose(out, torch.tensor([[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]]))
+
+
+def test_ground_fill_with_a_mask_changes_only_masked_rays() -> None:
+    # two rays straight down; only the masked one (the ego hood) is filled
+    rays_d = torch.tensor([[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]])
+    out = ground_fill(rays_d, torch.zeros(2, 3), [1.0, 1.0, 1.0], up=[0.0, 0.0, 1.0], horizon_deg=0.0, blend_deg=1.0,
+                      mask=torch.tensor([True, False]))
+    assert torch.equal(out, torch.tensor([[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]]))
