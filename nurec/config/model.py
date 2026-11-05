@@ -153,6 +153,10 @@ class SkyMlpBackgroundConfig(BaseBackgroundConfig):
     # Shrink that mask by this many pixels first, so the fill stays inside a narrower mask an external scorer uses
     # (mcity: NuRec's ego mask is ~15 px wider than the scorer's hood mask at 960x600; use 16).
     ground_fill_mask_erode_px: int = Field(default=0, ge=0)
+    # Detach the ray directions the sky sees, so its colour gradients never reach the camera poses (rig_calib). A sky
+    # frozen from another run is a fixed, detailed function of direction: its gradients pull the camera rotations
+    # towards wherever it fits best (mcity 40 s: a frozen sky trained without Gaussians moved the mountings 1.6-3 deg).
+    detach_ray_directions: bool = False
 
 
 class ExtraSignalSkyMlpBackgroundConfig(SkyMlpBackgroundConfig):

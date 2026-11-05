@@ -507,6 +507,8 @@ class SkyMlpBackground(BaseBackground):
         results: GaussiansCompositeReturn,
         is_training: bool,
     ) -> None:
+        if self.config.detach_ray_directions:
+            rays_d = rays_d.detach()
         dir_encoding = self.dir_encoding((rays_d.reshape(-1, 3) + 1) / 2)  # rays_d assumed to be normalized
         background_rgb = eval_tcnn_network(self.sky_mlp, dir_encoding).float()
 
