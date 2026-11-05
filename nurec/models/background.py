@@ -493,24 +493,49 @@ class SkyMlpBackground(BaseBackground):
         )
         self.dir_encoding.jit_fusion = self.config.enable_jit_if_supported and tcnn.supports_jit_fusion()
 
+        n_input = self.dir_encoding.n_output_dims
+        if self.config.time_knot_s > 0:
+            assert self.config.time_n_knots >= 2, "a time-dependent sky needs time_n_knots >= 2"
+            self.time_knots = nn.Parameter(torch.zeros(self.config.time_n_knots, self.config.time_dim))
+            n_input += self.config.time_dim
         self.sky_mlp = tcnn.Network(
-            n_input_dims=self.dir_encoding.n_output_dims,
+            n_input_dims=n_input,
             n_output_dims=3,
             network_config=config_to_primitive(self.config.mlp_network_config),
             seed=self.config.seed,
         )
         self.sky_mlp.jit_fusion = self.config.enable_jit_if_supported and tcnn.supports_jit_fusion()
+        self._time_logged = False
+
+    def time_codes(self, timestamps_us: torch.Tensor) -> torch.Tensor:
+        """[B] frame timestamps (us) -> [B, time_dim] codes, linearly interpolated between knots (flat outside)."""
+        x = (timestamps_us.double() - self.config.time_origin_us) / 1e6 / self.config.time_knot_s
+        i = torch.clamp(torch.floor(x), 0, self.config.time_n_knots - 2).long()
+        w = torch.clamp(x - i, 0.0, 1.0).float()[:, None]
+        if not self._time_logged:
+            logging.getLogger(__name__).info(f"time-dependent sky: first frame at {float(x[0]) * self.config.time_knot_s:.3f} s from the origin")
+            self._time_logged = True
+        return (1 - w) * self.time_knots[i] + w * self.time_knots[i + 1]
 
     def forward(
         self,
         rays_d: torch.Tensor,
         results: GaussiansCompositeReturn,
         is_training: bool,
+        timestamps_us: torch.Tensor | None = None,  # [B] frame mid timestamps; needed by a time-dependent sky
     ) -> None:
         if self.config.detach_ray_directions:
             rays_d = rays_d.detach()
         dir_encoding = self.dir_encoding((rays_d.reshape(-1, 3) + 1) / 2)  # rays_d assumed to be normalized
+        if self.config.time_knot_s > 0:
+            assert timestamps_us is not None, "a time-dependent sky needs the frame timestamps"
+            z = self.time_codes(timestamps_us.reshape(-1))  # [B, time_dim]
+            per_frame = dir_encoding.shape[0] // z.shape[0]
+            z = z.repeat_interleave(per_frame, dim=0).to(dir_encoding.dtype)
+            dir_encoding = torch.cat([dir_encoding, z], dim=-1)
         background_rgb = eval_tcnn_network(self.sky_mlp, dir_encoding).float()
+        if self.config.output_softplus:
+            background_rgb = torch.nn.functional.softplus(background_rgb)
 
         self.combine_rgb_colors(results, background_rgb)
 

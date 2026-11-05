@@ -3549,6 +3549,14 @@ class GaussiansComposite(BaseModel, CompositeModel):
                         is_training_batch,
                         texture_update_mask=texture_update_mask,
                     )
+                elif isinstance(self.background, SkyMlpBackground) and self.background.config.time_knot_s > 0:
+                    # time-dependent sky: each frame's mid timestamp selects its time codes
+                    self.background(
+                        background_rays_d.reshape(-1, 3),
+                        out,
+                        is_training_batch,
+                        timestamps_us=rendering_camera.timestamps_startend_us.double().mean(dim=-1),
+                    )
                 else:
                     self.background(background_rays_d.reshape(-1, 3), out, is_training_batch)
 

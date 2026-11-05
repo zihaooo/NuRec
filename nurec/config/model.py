@@ -157,6 +157,16 @@ class SkyMlpBackgroundConfig(BaseBackgroundConfig):
     # frozen from another run is a fixed, detailed function of direction: its gradients pull the camera rotations
     # towards wherever it fits best (mcity 40 s: a frozen sky trained without Gaussians moved the mountings 1.6-3 deg).
     detach_ray_directions: bool = False
+    # Time-dependent sky (pipeline/multiclip/sky_stage1.py, 2026-11-05): time_n_knots latent codes of time_dim numbers,
+    # one every time_knot_s seconds from time_origin_us, linearly interpolated at each frame's mid timestamp and
+    # appended to the direction features before the MLP (whose input grows by time_dim). 0 = direction only.
+    time_knot_s: float = 0.0
+    time_dim: int = 8
+    time_n_knots: int = 0
+    time_origin_us: int = 0
+    # softplus on the MLP output (with mlp_network_config.output_activation: None): the stage-1 time sky's output; an
+    # output ReLU can die for good
+    output_softplus: bool = False
 
 
 class ExtraSignalSkyMlpBackgroundConfig(SkyMlpBackgroundConfig):
