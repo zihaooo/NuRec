@@ -332,6 +332,12 @@ class NCoreDatasetConfig(_BaseDatasetSOConfig):
         "the last frame. Lets a multi-cell run render only one cell's frames (pipeline/multiclip/ncell, 2026-11-05).",
         default=None,
     )
+    val_camera_frames_file: Optional[str] = Field(
+        description="JSON file: camera id -> local camera frame indices to validate / render (as the coverage sampler's "
+        "include_frames_file). Overrides val_camera_frame_start/step/end for cameras it lists; for cells whose frames are "
+        "not contiguous, e.g. place cells over a revisited drive (pipeline/multiclip/ncell, 2026-11-06).",
+        default=None,
+    )
     val_camera_exclude_frame_start: Optional[int] = Field(
         description="Start camera frame index to exclude in validation / test mode. "
         "Used together with val_camera_exclude_frame_step.",

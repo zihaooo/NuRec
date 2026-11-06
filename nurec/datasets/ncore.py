@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import ctypes
 import logging
 import math
@@ -1425,6 +1426,16 @@ class NCORESequentialDataset(NCOREDataset):
                 self.camera_frames[camera_id] = list(
                     datasource.camera_frame_ranges[camera_id][camera_frame_start:camera_frame_end:camera_frame_step]
                 )
+            frames_file = getattr(config, "val_camera_frames_file", None) if split == "val" else None
+            if frames_file:  # explicit local frame lists (place cells): replace the range for the cameras listed
+                with open(frames_file) as f:
+                    listed = json.load(f)
+                for camera_id in self.camera_ids:
+                    if camera_id in listed:
+                        frame_range = list(datasource.camera_frame_ranges[camera_id])
+                        self.camera_frames[camera_id] = [frame_range[i] for i in sorted(listed[camera_id])]
+                logger.info(f"val_camera_frames_file {frames_file}: frames per camera "
+                            f"{ {k: len(v) for k, v in self.camera_frames.items()} }")
         else:
             assert camera_exclude_frame_start is not None, "camera_exclude_frame_start must be specified"
             assert camera_exclude_frame_step is not None, "camera_exclude_frame_step must be specified"
