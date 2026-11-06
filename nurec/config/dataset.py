@@ -327,6 +327,11 @@ class NCoreDatasetConfig(_BaseDatasetSOConfig):
         description="Camera frame step count for validation / test mode. Mutually exclusive with val_camera_exclude_frame_step, but one must be specified.",
         default=1,
     )
+    val_camera_frame_end: Optional[int] = Field(
+        description="Camera frame end index (exclusive) for validation / test mode with val_camera_frame_step; None = to "
+        "the last frame. Lets a multi-cell run render only one cell's frames (pipeline/multiclip/ncell, 2026-11-05).",
+        default=None,
+    )
     val_camera_exclude_frame_start: Optional[int] = Field(
         description="Start camera frame index to exclude in validation / test mode. "
         "Used together with val_camera_exclude_frame_step.",
