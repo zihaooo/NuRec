@@ -1277,6 +1277,16 @@ class PPISPPostProcessingConfig(BasePostProcessingConfig):
     scheduler_decay_max_steps: int = 30000
     scheduler_final_factor: float = 0.01
 
+    # Render-time per-frame parameters (mcity multiclip, 2026-11-06; default = the library's behaviour):
+    # "controller": the controller predicts exposure/colour for every frame (training frames too).
+    # "interp": a training frame uses its own fitted exposure/colour; a held-out frame the values interpolated
+    #   (by frame index) from the nearest training frames of the same camera before and after it. A diagnosis of
+    #   the controller (and a "re-render the recorded drive" protocol); training is unaffected.
+    heldout_params: Literal["controller", "interp"] = "controller"
+    # CSV to append, per rendered frame: the controller's exposure/colour against the fitted (training frame) or
+    # interpolated (held-out frame) values. Render-time only; None = off.
+    diag_csv: Optional[str] = None
+
 
 class PPISPLegacyPostProcessingConfig(BasePostProcessingConfig):
     """Legacy PPISP post-processing (render-only, for upgraded checkpoints).

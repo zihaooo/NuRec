@@ -1183,7 +1183,9 @@ class GaussiansSystem(BaseSystemSO):
         # Configuration defines what image sequence types (modalities) will be output during validation and test
         out_types = []
         if self.config.test.save_results:
-            out_types.extend(["pred_rgb", "pred_distance", "pred_normal", "pred_opacity"])
+            all_results = ["pred_rgb", "pred_distance", "pred_normal", "pred_opacity"]
+            wanted = getattr(self.config.test, "result_types", None)
+            out_types.extend([t for t in all_results if wanted is None or t in wanted])
         if self.config.test.save_inputs:
             out_types.extend(
                 [
@@ -2096,7 +2098,30 @@ class GaussiansSystem(BaseSystemSO):
             cmap="gray",
         )
 
+    def _write_result_png(self, path: str, im: np.ndarray) -> None:
+        """Write one result PNG with the configured zlib level, in a background thread if image_writer_threads > 0."""
+        level = getattr(self.config.test, "png_compress_level", None)
+        kwargs = {} if level is None else {"compress_level": int(level)}
+        n_threads = int(getattr(self.config.test, "image_writer_threads", 0) or 0)
+        if n_threads <= 0:
+            imageio.v2.imsave(path, im, **kwargs)
+            return
+        if getattr(self, "_png_pool", None) is None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            self._png_pool = ThreadPoolExecutor(max_workers=n_threads)
+            self._png_futures = []
+        self._png_futures.append(self._png_pool.submit(imageio.v2.imsave, path, im.copy(), **kwargs))
+        while len(self._png_futures) > 4 * n_threads:  # bound the queue (memory); surfaces write errors early
+            self._png_futures.pop(0).result()
+
+    def _finish_result_pngs(self) -> None:
+        for f in getattr(self, "_png_futures", None) or []:
+            f.result()
+        self._png_futures = []
+
     def on_validation_epoch_end(self) -> None:
+        self._finish_result_pngs()  # every result PNG on disk before videos / the caller read them
         if self.config.test.save_videos and len(self.val_out_types):
             self.save_videos(self.val_dir, self.val_out_types, suffix_list=self.val_suffix)
             for suffix in self.config.test.val_render_selected_nodes:
@@ -2370,7 +2395,7 @@ class GaussiansSystem(BaseSystemSO):
                 out_type_name = out_type_name + "-" + "-".join(suffix_list)
 
             os.makedirs(out_dir := os.path.join(save_dir, out_type_name, cam_dir), exist_ok=True)
-            imageio.v2.imsave(os.path.join(out_dir, image_name + ".png"), im)
+            self._write_result_png(os.path.join(out_dir, image_name + ".png"), im)
 
             if self.config.save_logger:
                 # log image sequences as batch-numerated '<image-type>(-suffix)-cam_<cam-idx>-step_<global-step>-rank_<rank>' metrics in UIs

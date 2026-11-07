@@ -14,6 +14,21 @@ class PrecomputeExtraSignalsConfig(BaseConfigSchema):
 
 class SystemTestConfig(BaseConfigSchema):
     save_results: bool = False
+    png_compress_level: Optional[int] = Field(
+        default=None,
+        description="zlib level (0-9) of the result PNGs; None = Pillow's default (6). PNG is lossless, so the pixels are "
+        "the same at any level; 1 is several times faster to write (writing dominated colour-only renders: mcity, 2026-11-06).",
+    )
+    image_writer_threads: int = Field(
+        default=0,
+        description="Background threads that write the result PNGs, so encoding overlaps the next image's rendering; "
+        "0 = write in the main thread. All writes finish before the validation epoch ends.",
+    )
+    result_types: Optional[list[str]] = Field(
+        default=None,
+        description="With save_results, the result images to write (e.g. [pred_rgb]); None = all of pred_rgb, "
+        "pred_distance, pred_normal, pred_opacity. A colour-only render skips the rest (mcity multiclip, 2026-11-06).",
+    )
     save_inputs: bool = False
     save_videos: bool = False
     save_stats: bool = False

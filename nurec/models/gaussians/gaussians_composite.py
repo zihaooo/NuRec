@@ -746,6 +746,18 @@ class GaussiansComposite(BaseModel, CompositeModel):
                 n_training_frames_per_camera=datasource.get_n_training_frames_per_camera().tolist(),
                 n_training_frames_per_lidar=[],
             )
+            if hasattr(post_processing, "set_camera_frame_mapping") and hasattr(
+                datasource, "camera_linear_start_frame_indices"
+            ):  # PPISP's render-time per-frame options (heldout_params / diag_csv) need the frame bookkeeping
+                ranges = [
+                    (
+                        datasource.camera_linear_start_frame_indices[camera_id],
+                        datasource.camera_linear_start_frame_indices[camera_id]
+                        + len(datasource.camera_frame_ranges[camera_id]),
+                    )
+                    for camera_id in datasource.camera_frame_ranges
+                ]
+                post_processing.set_camera_frame_mapping(datasource.get_global_to_training_camera_frame_mapping(), ranges)
             post_processings.append(post_processing)
 
         self.gaussians_nodes = TypedModuleDict(gaussians_nodes)
@@ -3649,6 +3661,11 @@ class GaussiansComposite(BaseModel, CompositeModel):
                 with ScopedTimer(
                     f"GaussiansComposite/post_processing/post_processing/{post_processing.__class__.__name__}"
                 ):
+                    extra = (
+                        {"unique_frame_idx": batch.data.camera.meta[0].unique_frame_idx}
+                        if hasattr(post_processing, "set_camera_frame_mapping")
+                        else {}
+                    )
                     post_processing(
                         results=out,
                         rays=batch.rendering.camera.rays.reshape(-1, 6),
@@ -3657,6 +3674,7 @@ class GaussiansComposite(BaseModel, CompositeModel):
                         training_frame_idx=batch.data.camera.meta[0].training_frame_idx,
                         unique_sensor_idx=batch.data.camera.meta[0].unique_sensor_idx,
                         global_step=global_step,
+                        **extra,
                     )
 
         if ground_fill_pre_pp_rgb is not None:
