@@ -746,18 +746,23 @@ class GaussiansComposite(BaseModel, CompositeModel):
                 n_training_frames_per_camera=datasource.get_n_training_frames_per_camera().tolist(),
                 n_training_frames_per_lidar=[],
             )
+            # PPISP's render-time per-frame options (heldout_params / diag_csv) need the frame bookkeeping, which lives
+            # on the NCORE datasource (inside the DataSourceSummary the model is built with, when it has one)
+            frame_source = getattr(datasource, "datasource", None) or datasource
             if hasattr(post_processing, "set_camera_frame_mapping") and hasattr(
-                datasource, "camera_linear_start_frame_indices"
-            ):  # PPISP's render-time per-frame options (heldout_params / diag_csv) need the frame bookkeeping
+                frame_source, "camera_linear_start_frame_indices"
+            ):
                 ranges = [
                     (
-                        datasource.camera_linear_start_frame_indices[camera_id],
-                        datasource.camera_linear_start_frame_indices[camera_id]
-                        + len(datasource.camera_frame_ranges[camera_id]),
+                        frame_source.camera_linear_start_frame_indices[camera_id],
+                        frame_source.camera_linear_start_frame_indices[camera_id]
+                        + len(frame_source.camera_frame_ranges[camera_id]),
                     )
-                    for camera_id in datasource.camera_frame_ranges
+                    for camera_id in frame_source.camera_frame_ranges
                 ]
-                post_processing.set_camera_frame_mapping(datasource.get_global_to_training_camera_frame_mapping(), ranges)
+                post_processing.set_camera_frame_mapping(
+                    frame_source.get_global_to_training_camera_frame_mapping(), ranges
+                )
             post_processings.append(post_processing)
 
         self.gaussians_nodes = TypedModuleDict(gaussians_nodes)
