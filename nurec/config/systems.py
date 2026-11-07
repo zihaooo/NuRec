@@ -14,15 +14,12 @@ class PrecomputeExtraSignalsConfig(BaseConfigSchema):
 
 class SystemTestConfig(BaseConfigSchema):
     save_results: bool = False
-    png_compress_level: Optional[int] = Field(
-        default=None,
-        description="zlib level (0-9) of the result PNGs; None = Pillow's default (6). PNG is lossless, so the pixels are "
-        "the same at any level; 1 is several times faster to write (writing dominated colour-only renders: mcity, 2026-11-06).",
-    )
     image_writer_threads: int = Field(
         default=0,
-        description="Background threads that write the result PNGs, so encoding overlaps the next image's rendering; "
-        "0 = write in the main thread. All writes finish before the validation epoch ends.",
+        description="Background threads that encode and write the result PNGs, decoupled from rendering (PNG encoding "
+        "took ~75% of a colour-only render's time in the main thread; Pillow releases the GIL, so threads scale: mcity, "
+        "2026-11-06). Files are byte-identical to synchronous writing. 0 = write in the main thread. All writes finish "
+        "before the validation epoch ends.",
     )
     result_types: Optional[list[str]] = Field(
         default=None,

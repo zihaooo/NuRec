@@ -2099,19 +2099,17 @@ class GaussiansSystem(BaseSystemSO):
         )
 
     def _write_result_png(self, path: str, im: np.ndarray) -> None:
-        """Write one result PNG with the configured zlib level, in a background thread if image_writer_threads > 0."""
-        level = getattr(self.config.test, "png_compress_level", None)
-        kwargs = {} if level is None else {"compress_level": int(level)}
+        """Write one result PNG, in a background thread if image_writer_threads > 0 (decoupled from rendering)."""
         n_threads = int(getattr(self.config.test, "image_writer_threads", 0) or 0)
         if n_threads <= 0:
-            imageio.v2.imsave(path, im, **kwargs)
+            imageio.v2.imsave(path, im)
             return
         if getattr(self, "_png_pool", None) is None:
             from concurrent.futures import ThreadPoolExecutor
 
             self._png_pool = ThreadPoolExecutor(max_workers=n_threads)
             self._png_futures = []
-        self._png_futures.append(self._png_pool.submit(imageio.v2.imsave, path, im.copy(), **kwargs))
+        self._png_futures.append(self._png_pool.submit(imageio.v2.imsave, path, im.copy()))
         while len(self._png_futures) > 4 * n_threads:  # bound the queue (memory); surfaces write errors early
             self._png_futures.pop(0).result()
 
