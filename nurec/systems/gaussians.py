@@ -8,6 +8,8 @@ import glob
 import logging
 import os
 
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, List, Mapping, Optional, cast
 
@@ -146,6 +148,10 @@ class GaussiansSystem(BaseSystemSO):
     config: GaussiansSystemConfig
     model: GaussiansComposite
     test_out_types: list[str]
+    # Background PNG writers (test.image_writer_threads > 0) and their pending writes, created on first use;
+    # see _write_result_png.
+    _png_writer: ThreadPoolExecutor | None = None
+    _png_writes: deque[Future[None]]
 
     def __init__(
         self,
@@ -568,6 +574,9 @@ class GaussiansSystem(BaseSystemSO):
 
     def teardown(self, stage: str) -> None:
         self.model.drain_fused_gather_generation_plan_refresh()
+        if self._png_writer is not None:
+            self._png_writer.shutdown(wait=True)
+            self._png_writer = None
         super().teardown(stage)
 
     def _should_collect_garbage(self) -> bool:
@@ -1137,9 +1146,14 @@ class GaussiansSystem(BaseSystemSO):
 
     def get_output_types(self) -> list[str]:
         # Configuration defines what image sequence types (modalities) will be output during validation and test
-        out_types = []
+        out_types: list[str] = []
         if self.config.test.save_results:
-            out_types.extend(["pred_rgb", "pred_distance", "pred_normal", "pred_opacity"])
+            result_types = self.config.test.result_types
+            out_types.extend(
+                out_type
+                for out_type in ["pred_rgb", "pred_distance", "pred_normal", "pred_opacity"]
+                if result_types is None or out_type in result_types
+            )
         if self.config.test.save_inputs:
             out_types.extend(
                 [
@@ -1473,7 +1487,9 @@ class GaussiansSystem(BaseSystemSO):
             return
 
         w, h = unpack_optional(camera.w), unpack_optional(camera.h)
-        rgb_gt = unpack_optional(camera.labels.rgb).squeeze(0)  # (h, w, 3)
+        # No ground truth when the dataset skips decoding the camera images (dataset.val_load_rgb=false): the
+        # render is then only saved, and no image metrics are computed.
+        rgb_gt = camera.labels.rgb.squeeze(0) if camera.labels.rgb is not None else None  # (h, w, 3)
         batch_idx = unpack_optional(batch.data.idx)
 
         # Used for metrics
@@ -1483,7 +1499,9 @@ class GaussiansSystem(BaseSystemSO):
 
         # only validate valid rays (rays that are *not* marked as invalid)
         valid_rays_mask = camera.labels.get_mask_flags_none(RayFlags.INVALID).squeeze()  # h, w
-        if valid_rays_mask.any():
+        if rgb_gt is None:
+            pass  # render-only validation: no image metrics
+        elif valid_rays_mask.any():
             rendered_rgb = rearrange(rendered.rgb, "(h w) c -> h w c", h=h)
             valid_rgb = rendered_rgb[valid_rays_mask]
             valid_rgb_gt = rgb_gt[valid_rays_mask]
@@ -2052,7 +2070,37 @@ class GaussiansSystem(BaseSystemSO):
             cmap="gray",
         )
 
+    def _write_result_png(self, path: str, im: np.ndarray) -> None:
+        """Write one validation / test PNG, on a background writer thread if test.image_writer_threads > 0.
+
+        PNG encoding dominates render-only validation on the main thread; Pillow releases the GIL while
+        compressing, so writer threads let it overlap with rendering the next frames.
+        """
+        n_threads = self.config.test.image_writer_threads
+        if n_threads == 0:
+            imageio.v2.imsave(path, im)
+            return
+        if self._png_writer is None:
+            self._png_writer = ThreadPoolExecutor(max_workers=n_threads, thread_name_prefix="nurec-png-writer")
+            self._png_writes = deque()
+        self._png_writes.append(self._png_writer.submit(imageio.v2.imsave, path, im.copy()))
+        # Bound the queued images (memory) and surface write errors early.
+        while len(self._png_writes) > 4 * n_threads:
+            self._png_writes.popleft().result()
+
+    def _finish_result_pngs(self) -> None:
+        """Wait until every queued PNG is on disk and stop the writer threads; re-raises the first failed write."""
+        if self._png_writer is None:
+            return
+        writer, self._png_writer = self._png_writer, None
+        try:
+            while self._png_writes:
+                self._png_writes.popleft().result()
+        finally:
+            writer.shutdown(wait=True)
+
     def on_validation_epoch_end(self) -> None:
+        self._finish_result_pngs()
         if self.config.test.save_videos and len(self.val_out_types):
             self.save_videos(self.val_dir, self.val_out_types, suffix_list=self.val_suffix)
             for suffix in self.config.test.val_render_selected_nodes:
@@ -2115,6 +2163,7 @@ class GaussiansSystem(BaseSystemSO):
                 )
 
     def on_test_epoch_end(self):
+        self._finish_result_pngs()
         if isinstance(self.model.background, SkyEnvMapBackground):
             self.model.background.restore_original_textures()
 
@@ -2252,8 +2301,8 @@ class GaussiansSystem(BaseSystemSO):
                             im = sem2img(im, color_remap=colormap)
 
                 case "input_rgb":
-                    if camera is not None:
-                        im = unpack_optional(camera.labels.rgb).cpu().numpy().squeeze()
+                    if camera is not None and camera.labels.rgb is not None:
+                        im = camera.labels.rgb.cpu().numpy().squeeze()
                         im = (im * 255).astype(np.uint8)
 
                 case "input_distance":
@@ -2326,7 +2375,7 @@ class GaussiansSystem(BaseSystemSO):
                 out_type_name = out_type_name + "-" + "-".join(suffix_list)
 
             os.makedirs(out_dir := os.path.join(save_dir, out_type_name, cam_dir), exist_ok=True)
-            imageio.v2.imsave(os.path.join(out_dir, image_name + ".png"), im)
+            self._write_result_png(os.path.join(out_dir, image_name + ".png"), im)
 
             if self.config.save_logger:
                 # log image sequences as batch-numerated '<image-type>(-suffix)-cam_<cam-idx>-step_<global-step>-rank_<rank>' metrics in UIs
@@ -2345,6 +2394,7 @@ class GaussiansSystem(BaseSystemSO):
     @rank_zero_only
     def save_videos(self, save_dir: str, out_seq_types: list[str], suffix_list: list[str]) -> None:
         # Only rank 0 should create videos in distributed training/validation
+        self._finish_result_pngs()  # the videos are read back from the PNGs
         for out_seq_type in out_seq_types:
             out_type_name = out_seq_type
             if len(suffix_list) > 0:

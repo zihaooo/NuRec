@@ -314,6 +314,11 @@ class NCoreDatasetConfig(_BaseDatasetSOConfig):
         description="If enabled, will return lidar rays in validation/test time.",
         default=False,
     )
+    val_load_rgb: bool = Field(
+        description="If disabled, validation/test frames skip decoding the camera images (the ground truth): renders "
+        "are still produced and saved, but no image metrics are computed. Speeds up render-only runs.",
+        default=True,
+    )
     # Translation (meters, relative to rig frame) / rotation (deg, XYZ / roll-pitch-yaw Euler angles relative
     # to rig frame) extrinsic deltas to apply to all sensor extrinsics for validation / test data generation (e.g., for novel-view rendering)
     # If extrinsic deltas are applied, rays will be inconsistent with label data / most metrics can't be evaluated

@@ -14,6 +14,18 @@ class PrecomputeExtraSignalsConfig(BaseConfigSchema):
 
 class SystemTestConfig(BaseConfigSchema):
     save_results: bool = False
+    result_types: Optional[list[Literal["pred_rgb", "pred_distance", "pred_normal", "pred_opacity"]]] = Field(
+        default=None,
+        description="With save_results, the predicted images to write, e.g. [pred_rgb] for colour only. "
+        "None writes all of pred_rgb, pred_distance, pred_normal and pred_opacity.",
+    )
+    image_writer_threads: int = Field(
+        default=0,
+        ge=0,
+        description="Background threads that encode and write the validation / test PNGs while the next frame "
+        "renders; 0 writes them on the main thread. The files are identical either way. Queued writes finish "
+        "before videos are made and before the validation / test epoch ends.",
+    )
     save_inputs: bool = False
     save_videos: bool = False
     save_stats: bool = False

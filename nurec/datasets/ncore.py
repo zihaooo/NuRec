@@ -1385,6 +1385,7 @@ class NCORESequentialDataset(NCOREDataset):
         self.lidar_frames: dict[str, list[int]] = {}
         self.return_lidar: bool
         self.return_camera: bool
+        self.load_rgb: bool
 
         if split == "val":
             self.n_image_subsample = config.n_val_image_subsample
@@ -1398,6 +1399,7 @@ class NCORESequentialDataset(NCOREDataset):
             lidar_exclude_frame_step = config.val_lidar_exclude_frame_step
             self.return_lidar = config.val_lidar
             self.return_camera = config.val_camera
+            self.load_rgb = config.val_load_rgb
         elif split == "train-sequential":
             self.n_image_subsample = config.n_train_sequential_image_subsample
             camera_frame_start = config.train_sequential_camera_frame_start
@@ -1410,6 +1412,7 @@ class NCORESequentialDataset(NCOREDataset):
             lidar_exclude_frame_step = config.train_sequential_lidar_exclude_frame_step
             self.return_lidar = config.train_sequential_lidar
             self.return_camera = config.train_sequential_camera
+            self.load_rgb = True
         else:
             raise ValueError(f"Unexpected {split=}.")
 
@@ -1602,6 +1605,7 @@ class NCORESequentialDataset(NCOREDataset):
                         original_width=camera_width,
                         original_height=camera_height,
                     ),
+                    load_rgb=self.load_rgb,
                 )
 
                 if T_camera_delta_rot is not None or transl_delta_m is not None:

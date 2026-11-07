@@ -15,6 +15,8 @@ record_quality_metrics:
 
 test:
   save_results: true
+  result_types: null # with save_results, the predicted images to write, e.g. [pred_rgb]; null writes all
+  image_writer_threads: 0 # background threads that write the validation / test PNGs; 0 writes them on the main thread
   save_inputs: false
   save_videos: true
   save_stats: false
