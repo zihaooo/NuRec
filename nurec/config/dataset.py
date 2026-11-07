@@ -332,6 +332,12 @@ class NCoreDatasetConfig(_BaseDatasetSOConfig):
         "the last frame. Lets a multi-cell run render only one cell's frames (pipeline/multiclip/ncell, 2026-11-05).",
         default=None,
     )
+    val_load_rgb: bool = Field(
+        default=True,
+        description="Decode each validation frame's camera image (the ground truth). False for render-only runs: the "
+        "photo is then never loaded and validation computes no image metrics, only renders and saves outputs "
+        "(mcity multiclip colour-only renders, 2026-11-06).",
+    )
     val_camera_frames_file: Optional[str] = Field(
         description="JSON file: camera id -> local camera frame indices to validate / render (as the coverage sampler's "
         "include_frames_file). Overrides val_camera_frame_start/step/end for cameras it lists; for cells whose frames are "

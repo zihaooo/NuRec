@@ -1400,6 +1400,7 @@ class NCORESequentialDataset(NCOREDataset):
             lidar_exclude_frame_step = config.val_lidar_exclude_frame_step
             self.return_lidar = config.val_lidar
             self.return_camera = config.val_camera
+            self.load_rgb = bool(getattr(config, "val_load_rgb", True))
         elif split == "train-sequential":
             self.n_image_subsample = config.n_train_sequential_image_subsample
             camera_frame_start = config.train_sequential_camera_frame_start
@@ -1615,6 +1616,7 @@ class NCORESequentialDataset(NCOREDataset):
                         original_width=camera_width,
                         original_height=camera_height,
                     ),
+                    load_rgb=getattr(self, "load_rgb", True),
                 )
 
                 if T_camera_delta_rot is not None or transl_delta_m is not None:

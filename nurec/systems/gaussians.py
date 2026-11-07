@@ -1519,7 +1519,8 @@ class GaussiansSystem(BaseSystemSO):
             return
 
         w, h = unpack_optional(camera.w), unpack_optional(camera.h)
-        rgb_gt = unpack_optional(camera.labels.rgb).squeeze(0)  # (h, w, 3)
+        # no ground truth when the photo was not loaded (dataset.val_load_rgb=false, render-only): render and save only
+        rgb_gt = camera.labels.rgb.squeeze(0) if camera.labels.rgb is not None else None  # (h, w, 3)
         batch_idx = unpack_optional(batch.data.idx)
 
         # Used for metrics
@@ -1529,7 +1530,9 @@ class GaussiansSystem(BaseSystemSO):
 
         # only validate valid rays (rays that are *not* marked as invalid)
         valid_rays_mask = camera.labels.get_mask_flags_none(RayFlags.INVALID).squeeze()  # h, w
-        if valid_rays_mask.any():
+        if rgb_gt is None:
+            pass  # render-only: no metrics
+        elif valid_rays_mask.any():
             rendered_rgb = rearrange(rendered.rgb, "(h w) c -> h w c", h=h)
             valid_rgb = rendered_rgb[valid_rays_mask]
             valid_rgb_gt = rgb_gt[valid_rays_mask]
