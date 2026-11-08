@@ -40,6 +40,20 @@ class RigTrajectoryCalibConfig(BaseConfigSchema):
     curvature_l1_weight: float = Field(default=0.0001, ge=0.0)
     curvature_translation_normalization_m_s2: float = Field(default=2.0, gt=0.0)
     curvature_rotation_normalization_degrees_s2: float = Field(default=20.0, gt=0.0)
+    # mcity multiclip (2026-11-08): a run that trains only some of its dataset's frames (a whole-drive place cell via
+    # the camera frame sampler's include_frames_file) keeps the dataset's global spline, one time axis shared by every
+    # cell, but optimises only the knots its frames use. JSON {camera_id: [frame index, ...]} (or a list of frame
+    # indices for every camera) of the frames whose poses the run uses, training and held out. Knots outside their
+    # B-spline support get no gradient and are left out of the curvature mean, so the curvature weight acts as in a
+    # dataset of just those frames. None: every knot (NuRec's behaviour).
+    active_frames_file: Optional[str] = None
+    # Anchor the active knots to their values when training starts (e.g. the coarse model's refined trajectory loaded
+    # by a weights-only resume), so a cell makes small local corrections without drifting to its own global offset:
+    # group L1 of the deviation, translation / anchor_translation_m + rotation / anchor_rotation_degrees, mean over the
+    # active knots, times anchor_weight. 0: off.
+    anchor_weight: float = Field(default=0.0, ge=0.0)
+    anchor_translation_m: float = Field(default=0.02, gt=0.0)
+    anchor_rotation_degrees: float = Field(default=0.05, gt=0.0)
 
 
 class CameraExtrinsicsCalibConfig(BaseConfigSchema):
@@ -49,6 +63,9 @@ class CameraExtrinsicsCalibConfig(BaseConfigSchema):
     gauge: Literal["mean-zero-per-trajectory"] = "mean-zero-per-trajectory"
     max_translation_m: float = Field(default=0.10, gt=0.0, le=100.0)
     max_rotation_degrees: float = Field(default=3.0, gt=0.0, le=180.0)
+    # mcity multiclip (2026-11-08): keep the loaded residuals (no gradient), e.g. every whole-drive cell keeps the
+    # coarse model's camera extrinsics, so the cells share one calibration.
+    freeze: bool = False
 
 
 class CalibConfig(BaseConfigSchema):

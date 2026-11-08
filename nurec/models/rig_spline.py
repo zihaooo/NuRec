@@ -228,6 +228,12 @@ class PackedRigSpline(nn.Module):
         if skip_first_control:
             anchor_mask[control_offsets[:-1]] = 0.0
         self.anchor_mask = nn.Buffer(anchor_mask, persistent=False)
+        # mcity multiclip (2026-11-08): the controls this run optimises (set_active_controls); all by default.
+        self.active_controls = nn.Buffer(
+            torch.ones(self.controls.shape[0], dtype=torch.bool, device=starts.device), persistent=False
+        )
+        self._active_hook = None
+        self._initial_controls: torch.Tensor | None = None  # anchor_loss's reference, taken at its first call
 
     @property
     def num_trajectories(self) -> int:
@@ -319,6 +325,54 @@ class PackedRigSpline(nn.Module):
     def forward(self, timestamps_us: torch.Tensor, trajectory_indices: torch.Tensor | int) -> torch.Tensor:
         return residual_vectors_to_transforms(self.evaluate(timestamps_us, trajectory_indices))
 
+    def control_mask_for(self, timestamps_us: torch.Tensor, trajectory_idx: int) -> torch.Tensor:
+        """Controls with non-zero basis weight at any of the timestamps (int64 microseconds) of one trajectory."""
+        mask = torch.zeros(self.controls.shape[0], dtype=torch.bool, device=self.controls.device)
+        if timestamps_us.numel() == 0:
+            return mask
+        timestamps = timestamps_us.reshape(-1).to(device=self.controls.device, dtype=torch.int64)
+        trajectories = torch.full_like(timestamps, trajectory_idx)
+        basis, packed_indices = self._local_basis_and_control_indices(timestamps, trajectories)
+        mask[packed_indices[basis > 0.0]] = True
+        return mask
+
+    def set_active_controls(self, mask: torch.Tensor) -> None:
+        """Optimise only these controls: the others get no gradient and are left out of the curvature mean."""
+        if mask.shape != (self.controls.shape[0],):
+            raise ValueError(f"active control mask has shape {tuple(mask.shape)}, expected ({self.controls.shape[0]},)")
+        self.active_controls.copy_(mask.to(self.active_controls.device, torch.bool))
+        if self._active_hook is None:
+            self._active_hook = self.controls.register_hook(
+                lambda grad: grad * self.active_controls[:, None].to(grad.dtype)
+            )
+
+    def anchor_loss(self, *, translation_normalization_m: float, rotation_normalization_rad: float) -> torch.Tensor:
+        """Group-L1 deviation of the active controls from their values at the first call (the loaded trajectory)."""
+        bounded = self.bounded_controls()
+        if self._initial_controls is None or self._initial_controls.shape != bounded.shape:
+            self._initial_controls = bounded.detach().clone()
+        active = self.active_controls
+        if not bool(active.any()):
+            return bounded.sum() * 0.0
+        deviation = (bounded - self._initial_controls.to(bounded.device))[active]
+        return (
+            torch.linalg.vector_norm(deviation[:, :3], dim=-1).mean() / translation_normalization_m
+            + torch.linalg.vector_norm(deviation[:, 3:], dim=-1).mean() / rotation_normalization_rad
+        )
+
+    def _active_second_difference_mask(self) -> torch.Tensor:
+        """Per second difference (as second_differences orders them): its centre control is active."""
+        masks: list[torch.Tensor] = []
+        for trajectory_idx in range(self.num_trajectories):
+            begin = int(self.control_offsets[trajectory_idx].item())
+            end = int(self.control_offsets[trajectory_idx + 1].item())
+            if end - begin < 3:
+                continue
+            masks.append(self.active_controls[begin + 1 : end - 1])
+        if not masks:
+            return torch.zeros(0, dtype=torch.bool, device=self.controls.device)
+        return torch.cat(masks)
+
     def second_differences(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Return translation/rotation second control differences in m/s² and rad/s²."""
         controls = self.bounded_controls()
@@ -349,6 +403,9 @@ class PackedRigSpline(nn.Module):
             raise ValueError("curvature normalizations must be positive")
         translation, rotation = self.second_differences()
         zero = self.controls.sum() * 0.0
+        if not bool(self.active_controls.all()):  # only the active part: a run of a subset of the dataset's frames
+            active = self._active_second_difference_mask()
+            translation, rotation = translation[active], rotation[active]
         translation_loss = (
             torch.linalg.vector_norm(translation, dim=-1).mean() / translation_normalization_m_s2
             if translation.numel()

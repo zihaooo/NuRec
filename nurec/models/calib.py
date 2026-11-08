@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import math
 
@@ -250,6 +251,15 @@ class RigCalib(BaseCalib):
                 max_translation_m=config.rig_trajectory.max_translation_m,
                 max_rotation_rad=math.radians(config.rig_trajectory.max_rotation_degrees),
             )
+            if config.rig_trajectory.active_frames_file:
+                mask = self._active_control_mask(rig_trajectories, config.rig_trajectory.active_frames_file)
+                self.rig_spline.set_active_controls(mask)
+                log.info(
+                    "rig spline: %d of %d controls active (frames in %s); the rest stay as loaded",
+                    int(mask.sum().item()),
+                    mask.numel(),
+                    config.rig_trajectory.active_frames_file,
+                )
         else:
             self.rig_spline = None
 
@@ -269,6 +279,9 @@ class RigCalib(BaseCalib):
                 max_translation_m=config.camera_extrinsics.max_translation_m,
                 max_rotation_rad=math.radians(config.camera_extrinsics.max_rotation_degrees),
             )
+            if config.camera_extrinsics.freeze:  # keep the loaded residuals (e.g. the coarse model's in every cell)
+                self.camera_extrinsics.residuals.register_hook(torch.zeros_like)
+                log.info("camera extrinsic residuals frozen at their loaded values")
         else:
             self.camera_extrinsics = None
         self.camera_extrinsic_indices = nn.Buffer(camera_extrinsic_indices, persistent=False)
@@ -317,6 +330,26 @@ class RigCalib(BaseCalib):
             extrinsics[lookup_index] = calibration.T_sensor_rig
             sensor_id_to_index[sensor_id] = lookup_index
         return trajectory_indices, extrinsics, sensor_id_to_index
+
+    def _active_control_mask(self, rig_trajectories: RigTrajectories, path: str) -> torch.Tensor:
+        """Controls supporting the listed frames: JSON {camera_id: [frame index, ...]} or a list for every camera."""
+        assert self.rig_spline is not None
+        with open(path) as f:
+            listed = json.load(f)
+        mask = torch.zeros(self.rig_spline.controls.shape[0], dtype=torch.bool)
+        matched = 0
+        for trajectory_idx, trajectory in enumerate(rig_trajectories.rig_trajectories):
+            for camera_id, timestamps in trajectory.cameras_frame_timestamps_us.items():
+                frames = listed if isinstance(listed, list) else listed.get(camera_id, [])
+                if not frames:
+                    continue
+                index = torch.as_tensor(sorted(set(int(g) for g in frames)), dtype=torch.int64)
+                index = index[(index >= 0) & (index < timestamps.shape[0])]
+                matched += int(index.numel())
+                mask |= self.rig_spline.control_mask_for(timestamps[index], trajectory_idx).cpu()
+        if matched == 0:
+            raise ValueError(f"active_frames_file {path}: no listed frame matches a camera of the dataset")
+        return mask
 
     @staticmethod
     def _trajectory_timestamp_bounds(
@@ -450,7 +483,22 @@ class RigCalib(BaseCalib):
     def regularization_loss(self) -> tuple[str, torch.Tensor, float] | None:
         rig_trajectory = self.config.rig_trajectory
         assert rig_trajectory is not None
-        if self.rig_spline is None or rig_trajectory.curvature_l1_weight <= 0.0:
+        if self.rig_spline is None:
+            return None
+        if rig_trajectory.anchor_weight > 0.0:  # mcity multiclip: curvature + anchor to the loaded trajectory
+            value = rig_trajectory.anchor_weight * self.rig_spline.anchor_loss(
+                translation_normalization_m=rig_trajectory.anchor_translation_m,
+                rotation_normalization_rad=math.radians(rig_trajectory.anchor_rotation_degrees),
+            )
+            if rig_trajectory.curvature_l1_weight > 0.0:
+                value = value + rig_trajectory.curvature_l1_weight * self.rig_spline.group_l1_curvature_loss(
+                    translation_normalization_m_s2=rig_trajectory.curvature_translation_normalization_m_s2,
+                    rotation_normalization_rad_s2=math.radians(
+                        rig_trajectory.curvature_rotation_normalization_degrees_s2
+                    ),
+                )
+            return "rig_spline_curvature_anchor", value, 1.0
+        if rig_trajectory.curvature_l1_weight <= 0.0:
             return None
         value = self.rig_spline.group_l1_curvature_loss(
             translation_normalization_m_s2=rig_trajectory.curvature_translation_normalization_m_s2,
