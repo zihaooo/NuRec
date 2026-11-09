@@ -590,6 +590,62 @@ class PPISPLegacyPostProcessing(BasePostProcessing):
 BasePostProcessing.register_variant("ppisp-post-processing-legacy", PPISPLegacyPostProcessing)
 
 
+class RowSelectiveAdam(torch.optim.Optimizer):
+    """Adam for PPISP's main parameters in which the per-frame tensors (first dimension = training frames) update only
+    the rows of the frames trained this step, each row with its own step count for the bias correction, as if every
+    frame had its own Adam that sees only its own samples (mcity multiclip, 2026-11-09). Rows not trained this step
+    keep their values and moments: no momentum drift, and the regularisers' gradient on them is dropped. Every other
+    parameter (per-camera vignetting / CRF) is plain Adam. `rows_fn` returns the trained rows (LongTensor) or None.
+    """
+
+    def __init__(self, params, *, lr: float, betas: tuple[float, float], eps: float, row_params, rows_fn):
+        super().__init__(params, dict(lr=lr, betas=tuple(betas), eps=eps))
+        self._row_param_ids = {id(p) for p in row_params}
+        self._rows_fn = rows_fn
+
+    @torch.no_grad()
+    def step(self, closure=None):  # type: ignore[override]
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        rows = self._rows_fn()
+        for group in self.param_groups:
+            lr, (b1, b2), eps = group["lr"], group["betas"], group["eps"]
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                state = self.state[p]
+                per_row = id(p) in self._row_param_ids
+                if not state:
+                    state["exp_avg"] = torch.zeros_like(p, memory_format=torch.preserve_format)
+                    state["exp_avg_sq"] = torch.zeros_like(p, memory_format=torch.preserve_format)
+                    state["step"] = torch.zeros(p.shape[0] if per_row else 1, dtype=torch.float32, device=p.device)
+                if per_row:
+                    if rows is None or rows.numel() == 0:
+                        continue
+                    g = p.grad[rows]
+                    m = state["exp_avg"][rows].mul_(b1).add_(g, alpha=1 - b1)
+                    v = state["exp_avg_sq"][rows].mul_(b2).addcmul_(g, g, value=1 - b2)
+                    s = state["step"][rows] + 1
+                    shape = (-1,) + (1,) * (p.dim() - 1)
+                    bc1 = (1 - torch.pow(b1, s)).view(shape)
+                    bc2 = (1 - torch.pow(b2, s)).view(shape)
+                    p[rows] = p[rows] - lr * (m / bc1) / ((v / bc2).sqrt() + eps)
+                    state["exp_avg"][rows] = m
+                    state["exp_avg_sq"][rows] = v
+                    state["step"][rows] = s
+                else:
+                    state["step"] += 1
+                    m, v = state["exp_avg"], state["exp_avg_sq"]
+                    m.mul_(b1).add_(p.grad, alpha=1 - b1)
+                    v.mul_(b2).addcmul_(p.grad, p.grad, value=1 - b2)
+                    bc1 = 1 - torch.pow(b1, state["step"])
+                    bc2 = 1 - torch.pow(b2, state["step"])
+                    p.sub_(lr * (m / bc1) / ((v / bc2).sqrt() + eps))
+        return loss
+
+
 class PPISPPostProcessing(BasePostProcessing):
     """Post-processing module wrapping the new PPISP library.
 
@@ -623,6 +679,8 @@ class PPISPPostProcessing(BasePostProcessing):
         # of all-frame indices; set by GaussiansComposite for heldout_params="interp" and diag_csv
         self._g2t: Any = None
         self._camera_ranges: list[tuple[int, int]] = []
+        # ppisp_row_selective: the per-frame rows trained since the last optimizer step (read by RowSelectiveAdam)
+        self._trained_rows: list[int] = []
 
     def set_camera_frame_mapping(self, g2t: Any, camera_ranges: list[tuple[int, int]]) -> None:
         """Frame bookkeeping for render-time per-frame parameters (heldout_params / diag_csv)."""
@@ -746,6 +804,8 @@ class PPISPPostProcessing(BasePostProcessing):
             f"training_frame_idx={training_frame_idx} out of valid range "
             f"[-1, 0..{self.num_frames - 1}] (num_frames={self.num_frames})"
         )
+        if self.config.ppisp_row_selective and torch.is_grad_enabled() and training_frame_idx >= 0:
+            self._trained_rows.append(int(training_frame_idx))
 
         params = None
         if self.config.heldout_params != "controller" or self.config.diag_csv:
@@ -844,11 +904,26 @@ class PPISPPostProcessing(BasePostProcessing):
         else:
             self._ppisp_version = PPISP_VERSION_LEGACY
 
+    def _pop_trained_rows(self) -> torch.Tensor | None:
+        """The per-frame rows trained since the last call (unique), then forgotten; None if none."""
+        if not self._trained_rows:
+            return None
+        rows = torch.tensor(sorted(set(self._trained_rows)), dtype=torch.long, device=self.ppisp.exposure_params.device)
+        self._trained_rows.clear()
+        return rows
+
     def configure_optimizers(self, name_prefix: str = "") -> List[OptimizerLRSchedulerConfig]:
         max_steps = self.trainer_config.max_steps
         assert max_steps > 0, "trainer_config.max_steps must be set before configuring PPISP optimizers"
 
         ppisp_optimizers = self.ppisp.create_optimizers()
+        if self.config.ppisp_row_selective:  # same parameters and hyper-parameters, per-frame rows updated sparsely
+            group = ppisp_optimizers[0].param_groups[0]
+            ppisp_optimizers[0] = RowSelectiveAdam(
+                group["params"], lr=group["lr"], betas=group["betas"], eps=group["eps"],
+                row_params=[self.ppisp.exposure_params, self.ppisp.color_params], rows_fn=self._pop_trained_rows,
+            )
+            logger.info("PPISP per-frame exposure / colour rows: row-selective Adam (only the trained frame's rows)")
         ppisp_schedulers = self.ppisp.create_schedulers(ppisp_optimizers, max_steps)
 
         result: List[OptimizerLRSchedulerConfig] = []

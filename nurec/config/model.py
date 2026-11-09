@@ -1279,6 +1279,11 @@ class PPISPPostProcessingConfig(BasePostProcessingConfig):
     ppisp_lr: float = 0.002
     ppisp_eps: float = 1e-15
     ppisp_betas: tuple[float, float] = (0.9, 0.999)
+    # mcity multiclip (2026-11-09): update the per-frame PPISP rows (exposure, colour) only on the steps that train
+    # their image, each row with its own Adam step count (per-camera vignetting / CRF stay dense Adam). The library's
+    # dense Adam keeps moving a row on momentum after each of its rare samples (~5 per image in an 80 s stage 2),
+    # which left isolated over-exposed frames (+0.2 to +0.6 exposure). False: the library's dense Adam.
+    ppisp_row_selective: bool = False
 
     # Controller optimizer (forwarded to ppisp.PPISPConfig)
     controller_lr: float = 0.001
