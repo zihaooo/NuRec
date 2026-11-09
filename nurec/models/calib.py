@@ -340,7 +340,12 @@ class RigCalib(BaseCalib):
         matched = 0
         for trajectory_idx, trajectory in enumerate(rig_trajectories.rig_trajectories):
             for camera_id, timestamps in trajectory.cameras_frame_timestamps_us.items():
-                frames = listed if isinstance(listed, list) else listed.get(camera_id, [])
+                # the trajectory keys unique sensor ids "<camera_id>@<sequence_id>"; frame lists use the camera id
+                frames = (
+                    listed
+                    if isinstance(listed, list)
+                    else listed.get(camera_id, listed.get(camera_id.split("@", 1)[0], []))
+                )
                 if not frames:
                     continue
                 index = torch.as_tensor(sorted(set(int(g) for g in frames)), dtype=torch.int64)
