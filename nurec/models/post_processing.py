@@ -598,10 +598,13 @@ class RowSelectiveAdam(torch.optim.Optimizer):
     parameter (per-camera vignetting / CRF) is plain Adam. `rows_fn` returns the trained rows (LongTensor) or None.
     """
 
-    def __init__(self, params, *, lr: float, betas: tuple[float, float], eps: float, row_params, rows_fn):
+    def __init__(self, params, *, lr: float, betas: tuple[float, float], eps: float, row_params, rows_fn,
+                 row_lr_scale: float = 1.0, dense_lr_scale: float = 1.0):
         super().__init__(params, dict(lr=lr, betas=tuple(betas), eps=eps))
         self._row_param_ids = {id(p) for p in row_params}
         self._rows_fn = rows_fn
+        self._row_lr_scale = float(row_lr_scale)
+        self._dense_lr_scale = float(dense_lr_scale)
 
     @torch.no_grad()
     def step(self, closure=None):  # type: ignore[override]
@@ -621,6 +624,8 @@ class RowSelectiveAdam(torch.optim.Optimizer):
                     state["exp_avg"] = torch.zeros_like(p, memory_format=torch.preserve_format)
                     state["exp_avg_sq"] = torch.zeros_like(p, memory_format=torch.preserve_format)
                     state["step"] = torch.zeros(p.shape[0] if per_row else 1, dtype=torch.float32, device=p.device)
+                if not per_row and self._dense_lr_scale == 0.0:
+                    continue  # dense parameters kept as they are (e.g. a per-frame refit)
                 if per_row:
                     if rows is None or rows.numel() == 0:
                         continue
@@ -631,7 +636,7 @@ class RowSelectiveAdam(torch.optim.Optimizer):
                     shape = (-1,) + (1,) * (p.dim() - 1)
                     bc1 = (1 - torch.pow(b1, s)).view(shape)
                     bc2 = (1 - torch.pow(b2, s)).view(shape)
-                    p[rows] = p[rows] - lr * (m / bc1) / ((v / bc2).sqrt() + eps)
+                    p[rows] = p[rows] - lr * self._row_lr_scale * (m / bc1) / ((v / bc2).sqrt() + eps)
                     state["exp_avg"][rows] = m
                     state["exp_avg_sq"][rows] = v
                     state["step"][rows] = s
@@ -642,7 +647,7 @@ class RowSelectiveAdam(torch.optim.Optimizer):
                     v.mul_(b2).addcmul_(p.grad, p.grad, value=1 - b2)
                     bc1 = 1 - torch.pow(b1, state["step"])
                     bc2 = 1 - torch.pow(b2, state["step"])
-                    p.sub_(lr * (m / bc1) / ((v / bc2).sqrt() + eps))
+                    p.sub_(lr * self._dense_lr_scale * (m / bc1) / ((v / bc2).sqrt() + eps))
         return loss
 
 
@@ -922,8 +927,12 @@ class PPISPPostProcessing(BasePostProcessing):
             ppisp_optimizers[0] = RowSelectiveAdam(
                 group["params"], lr=group["lr"], betas=group["betas"], eps=group["eps"],
                 row_params=[self.ppisp.exposure_params, self.ppisp.color_params], rows_fn=self._pop_trained_rows,
+                row_lr_scale=self.config.ppisp_row_lr_scale, dense_lr_scale=self.config.ppisp_dense_lr_scale,
             )
-            logger.info("PPISP per-frame exposure / colour rows: row-selective Adam (only the trained frame's rows)")
+            logger.info(
+                "PPISP per-frame exposure / colour rows: row-selective Adam (only the trained frame's rows), "
+                "row lr x%g, per-camera lr x%g", self.config.ppisp_row_lr_scale, self.config.ppisp_dense_lr_scale,
+            )
         ppisp_schedulers = self.ppisp.create_schedulers(ppisp_optimizers, max_steps)
 
         result: List[OptimizerLRSchedulerConfig] = []
