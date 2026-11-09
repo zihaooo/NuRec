@@ -1405,6 +1405,10 @@ class SHGaussiansLayerConfig(BaseLayerConfig):
     precision: int | None = None
     transmittance_threshold: float | None = None
     scale_pos_lr_by_scene_extent: bool = False
+    # mcity multiclip (2026-11-08): the extent (m) the position learning rate is scaled by, instead of the dataset's
+    # (its longest trajectory axis + 2 x max_dist_m): a cell trained on part of the whole drive passes its own frames'
+    # extent; the dataset AABB itself (out-of-bound loss, initialisation) is unchanged. None: the dataset's.
+    pos_lr_scene_extent: Optional[float] = None
     debug_viz: bool = False
 
     # Optional complex configs
