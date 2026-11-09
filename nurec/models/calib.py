@@ -280,7 +280,7 @@ class RigCalib(BaseCalib):
                 max_rotation_rad=math.radians(config.camera_extrinsics.max_rotation_degrees),
             )
             if config.camera_extrinsics.freeze:  # keep the loaded residuals (e.g. the coarse model's in every cell)
-                self.camera_extrinsics.residuals.register_hook(torch.zeros_like)
+                self.camera_extrinsics.frozen = True
                 log.info("camera extrinsic residuals frozen at their loaded values")
         else:
             self.camera_extrinsics = None

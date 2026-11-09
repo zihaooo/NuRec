@@ -88,6 +88,9 @@ class CameraExtrinsicResiduals(nn.Module):
         self.max_rotation_rad = max_rotation_rad
         self.trajectory_indices = nn.Buffer(trajectory_indices.detach().clone(), persistent=False)
         self.residuals = nn.Parameter(torch.zeros((trajectory_indices.numel(), 6), dtype=torch.float32))
+        # mcity multiclip (2026-11-08): frozen residuals are read detached, so they get no gradient (a tensor hook
+        # would be lost: NuRec's weights-only resume replaces parameters with load_state_dict(assign=True))
+        self.frozen = False
 
     @staticmethod
     def _shared_radial_bound(vectors: torch.Tensor, maximum: float) -> torch.Tensor:
@@ -104,7 +107,8 @@ class CameraExtrinsicResiduals(nn.Module):
         projected = torch.zeros_like(self.residuals)
         for trajectory_idx in self.trajectory_indices.unique().tolist():
             row_indices = torch.nonzero(self.trajectory_indices == trajectory_idx, as_tuple=False).squeeze(-1)
-            trajectory_residuals = self.residuals[row_indices]
+            residuals = self.residuals.detach() if self.frozen else self.residuals
+            trajectory_residuals = residuals[row_indices]
             centered = trajectory_residuals - trajectory_residuals.mean(dim=0, keepdim=True)
             projected = projected.index_copy(0, row_indices, centered)
         return projected
@@ -232,7 +236,6 @@ class PackedRigSpline(nn.Module):
         self.active_controls = nn.Buffer(
             torch.ones(self.controls.shape[0], dtype=torch.bool, device=starts.device), persistent=False
         )
-        self._active_hook = None
         self._initial_controls: torch.Tensor | None = None  # anchor_loss's reference, taken at its first call
 
     @property
@@ -251,9 +254,16 @@ class PackedRigSpline(nn.Module):
         rotation = rotation * (self.max_rotation_rad / rotation_norm).clamp(max=1.0)
         return torch.cat([translation, rotation], dim=-1)
 
+    def _trainable_controls(self) -> torch.Tensor:
+        """The controls, inactive ones detached (no gradient), so only the active part is optimised. Read in the
+        forward pass rather than masked by a tensor hook, which NuRec's load_state_dict(assign=True) would drop."""
+        if bool(self.active_controls.all()):
+            return self.controls
+        return torch.where(self.active_controls[:, None], self.controls, self.controls.detach())
+
     def bounded_controls(self) -> torch.Tensor:
         """Return radially bounded controls with per-trajectory anchors applied exactly."""
-        return self._apply_radial_bounds(self.controls) * self.anchor_mask[:, None]
+        return self._apply_radial_bounds(self._trainable_controls()) * self.anchor_mask[:, None]
 
     def _knot_value(self, trajectory_indices: torch.Tensor, knot_indices: torch.Tensor) -> torch.Tensor:
         """Evaluate packed open-uniform knots without materializing a global knot vector."""
@@ -318,7 +328,7 @@ class PackedRigSpline(nn.Module):
         basis, packed_indices = self._local_basis_and_control_indices(timestamps_us, trajectory_indices)
         # Bounds and anchoring are applied after the local gather so evaluation touches only p+1
         # controls per timestamp, independent of the full trajectory length.
-        controls = self._apply_radial_bounds(self.controls[packed_indices])
+        controls = self._apply_radial_bounds(self._trainable_controls()[packed_indices])
         controls = controls * self.anchor_mask[packed_indices][..., None]
         return torch.sum(basis[..., None] * controls, dim=-2)
 
@@ -341,10 +351,6 @@ class PackedRigSpline(nn.Module):
         if mask.shape != (self.controls.shape[0],):
             raise ValueError(f"active control mask has shape {tuple(mask.shape)}, expected ({self.controls.shape[0]},)")
         self.active_controls.copy_(mask.to(self.active_controls.device, torch.bool))
-        if self._active_hook is None:
-            self._active_hook = self.controls.register_hook(
-                lambda grad: grad * self.active_controls[:, None].to(grad.dtype)
-            )
 
     def anchor_loss(self, *, translation_normalization_m: float, rotation_normalization_rad: float) -> torch.Tensor:
         """Group-L1 deviation of the active controls from their values at the first call (the loaded trajectory)."""
