@@ -184,6 +184,17 @@ def _load_include_frames_file(path: str) -> dict[str, tuple[int, ...]]:
     return {str(k): tuple(int(i) for i in v) for k, v in raw.items()}
 
 
+@functools.lru_cache(maxsize=8)
+def _load_include_frames_repeats_file(path: str) -> dict[str, dict[int, int]]:
+    """Per-sensor visit counts for :class:`CoveragePlan` (``include_frames_repeats_file``): a JSON object mapping each
+    sensor id to ``{local frame index: repeats}``. A listed training frame appears ``repeats`` times in every coverage
+    pass (frames not listed: once), so with one pass spanning the run each image is trained exactly ``repeats`` times.
+    Lets a cell weight its own images over borrowed ones (visits by role) without changing which images it trains."""
+    with open(path) as f:
+        raw = json.load(f)
+    return {str(k): {int(i): int(r) for i, r in v.items()} for k, v in raw.items()}
+
+
 @functools.lru_cache(maxsize=16)
 def _coverage_permutation(base_seed: int, total: int, epoch: int) -> npt.NDArray[np.int64]:
     """Deterministic per-pass permutation of ``range(total)``.
@@ -362,6 +373,8 @@ class CoveragePlan:
         sensor_ids: list[str] = []
         unique_sensor_ids: list[str] = []
         per_sensor_frame_idxs: list[npt.NDArray[np.int64]] = []
+        repeats_file = frame_sampler_config.get("include_frames_repeats_file", None) if sensor_kind == "camera" else None
+        repeats = _load_include_frames_repeats_file(str(repeats_file)) if repeats_file else None
         for sensor_id in active_ids:
             frame_range = frame_ranges[sensor_id]
             mask = CoverageFrameSampler.training_frame_mask(
@@ -372,6 +385,13 @@ class CoveragePlan:
                 f"CoveragePlan: {sensor_kind} sensor '{sensor_id}' has no training frames over "
                 f"{len(frame_range)} frames; check the hold-out config."
             )
+            if repeats is not None and sensor_id in repeats:
+                # visits by role: each training frame appears `repeats` times per pass (duplicates are plain extra
+                # work items; restrict_to_pairs, used only by component-only refits, does not support them)
+                rep = repeats[sensor_id]
+                r = np.array([rep.get(int(i), 1) for i in np.flatnonzero(mask)], dtype=np.int64)
+                assert (r >= 1).all(), f"CoveragePlan: repeats must be >= 1 for '{sensor_id}'"
+                frame_idxs = np.repeat(frame_idxs, r)
             sensor_ids.append(sensor_id)
             unique_sensor_ids.append(unique_ids[sensor_id].id)
             per_sensor_frame_idxs.append(frame_idxs)
@@ -382,6 +402,14 @@ class CoveragePlan:
                 "CoveragePlan (%s, include_frames_file=%s): training frames per sensor %s",
                 sensor_kind,
                 frame_sampler_config.get("include_frames_file"),
+                dict(zip(sensor_ids, counts)),
+            )
+        if repeats is not None:
+            logger.info(
+                "CoveragePlan (%s, include_frames_repeats_file=%s): work items per pass %d (per sensor %s)",
+                sensor_kind,
+                repeats_file,
+                sum(counts),
                 dict(zip(sensor_ids, counts)),
             )
         prefix = np.concatenate([np.zeros(1, dtype=np.int64), np.cumsum(counts, dtype=np.int64)])
