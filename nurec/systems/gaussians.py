@@ -8,6 +8,8 @@ import glob
 import logging
 import os
 
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, List, Mapping, Optional, cast
 
@@ -146,6 +148,10 @@ class GaussiansSystem(BaseSystemSO):
     config: GaussiansSystemConfig
     model: GaussiansComposite
     test_out_types: list[str]
+    # Background PNG writers (test.image_writer_threads > 0) and their pending writes, created on first use;
+    # see _write_result_png.
+    _png_writer: ThreadPoolExecutor | None = None
+    _png_writes: deque[Future[None]]
 
     def __init__(
         self,
@@ -612,6 +618,9 @@ class GaussiansSystem(BaseSystemSO):
 
     def teardown(self, stage: str) -> None:
         self.model.drain_fused_gather_generation_plan_refresh()
+        if self._png_writer is not None:
+            self._png_writer.shutdown(wait=True)
+            self._png_writer = None
         super().teardown(stage)
 
     def _should_collect_garbage(self) -> bool:
@@ -2107,19 +2116,23 @@ class GaussiansSystem(BaseSystemSO):
         if n_threads <= 0:
             imageio.v2.imsave(path, im)
             return
-        if getattr(self, "_png_pool", None) is None:
-            from concurrent.futures import ThreadPoolExecutor
-
-            self._png_pool = ThreadPoolExecutor(max_workers=n_threads)
-            self._png_futures = []
-        self._png_futures.append(self._png_pool.submit(imageio.v2.imsave, path, im.copy()))
-        while len(self._png_futures) > 4 * n_threads:  # bound the queue (memory); surfaces write errors early
-            self._png_futures.pop(0).result()
+        if self._png_writer is None:
+            self._png_writer = ThreadPoolExecutor(max_workers=n_threads, thread_name_prefix="nurec-png-writer")
+            self._png_writes = deque()
+        self._png_writes.append(self._png_writer.submit(imageio.v2.imsave, path, im.copy()))
+        while len(self._png_writes) > 4 * n_threads:  # bound the queue (memory); surfaces write errors early
+            self._png_writes.popleft().result()
 
     def _finish_result_pngs(self) -> None:
-        for f in getattr(self, "_png_futures", None) or []:
-            f.result()
-        self._png_futures = []
+        """Wait until every queued PNG is on disk and stop the writer threads; re-raises the first failed write."""
+        if self._png_writer is None:
+            return
+        writer, self._png_writer = self._png_writer, None
+        try:
+            while self._png_writes:
+                self._png_writes.popleft().result()
+        finally:
+            writer.shutdown(wait=True)
 
     def on_validation_epoch_end(self) -> None:
         self._finish_result_pngs()  # every result PNG on disk before videos / the caller read them
@@ -2185,6 +2198,7 @@ class GaussiansSystem(BaseSystemSO):
                 )
 
     def on_test_epoch_end(self):
+        self._finish_result_pngs()
         if isinstance(self.model.background, SkyEnvMapBackground):
             self.model.background.restore_original_textures()
 
@@ -2322,8 +2336,8 @@ class GaussiansSystem(BaseSystemSO):
                             im = sem2img(im, color_remap=colormap)
 
                 case "input_rgb":
-                    if camera is not None:
-                        im = unpack_optional(camera.labels.rgb).cpu().numpy().squeeze()
+                    if camera is not None and camera.labels.rgb is not None:  # None with dataset.val_load_rgb=false
+                        im = camera.labels.rgb.cpu().numpy().squeeze()
                         im = (im * 255).astype(np.uint8)
 
                 case "input_distance":
@@ -2415,6 +2429,7 @@ class GaussiansSystem(BaseSystemSO):
     @rank_zero_only
     def save_videos(self, save_dir: str, out_seq_types: list[str], suffix_list: list[str]) -> None:
         # Only rank 0 should create videos in distributed training/validation
+        self._finish_result_pngs()  # the videos are read back from the PNGs
         for out_seq_type in out_seq_types:
             out_type_name = out_seq_type
             if len(suffix_list) > 0:
