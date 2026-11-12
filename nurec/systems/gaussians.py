@@ -542,7 +542,8 @@ class GaussiansSystem(BaseSystemSO):
         rendering restore everything from their checkpoint and skip it: there, lazy Gaussian layers are not
         materialized at setup. Fails loudly on a missing key or shape mismatch rather than training with a silently
         different model."""
-        cfg = self.cached_config.system.init_parts
+        system_cfg = getattr(self.cached_config, "system", None)  # absent in stub configs of upstream unit tests
+        cfg = system_cfg.init_parts if system_cfg is not None else None
         if cfg is None or getattr(self, "_init_parts_applied", False):
             return
         self._init_parts_applied = True
