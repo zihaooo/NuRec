@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import logging
-import os
 
 from abc import abstractmethod
 from typing import Any, List, Type, TypeVar
@@ -598,20 +597,20 @@ class PPISPPostProcessing(BasePostProcessing):
         # Version tracking: store the library version
         self._ppisp_version: str = ppisp_lib.__version__
         # all-frame camera index -> training index (-1 = not a training frame) and each camera's [start, end) range
-        # of all-frame indices; set by GaussiansComposite for heldout_params="interp" and diag_csv
+        # of all-frame indices; set by GaussiansComposite for heldout_params="interp"
         self._g2t: Any = None
         self._camera_ranges: list[tuple[int, int]] = []
         # ppisp_row_selective: the per-frame rows trained since the last optimizer step (read by RowSelectiveAdam)
         self._trained_rows: list[int] = []
 
     def set_camera_frame_mapping(self, g2t: Any, camera_ranges: list[tuple[int, int]]) -> None:
-        """Frame bookkeeping for render-time per-frame parameters (heldout_params / diag_csv)."""
+        """Frame bookkeeping for render-time per-frame parameters (heldout_params)."""
         self._g2t = [int(v) for v in g2t]
         self._camera_ranges = [(int(a), int(b)) for a, b in camera_ranges]
-        if self.config.heldout_params != "controller" or self.config.diag_csv:
+        if self.config.heldout_params != "controller":
             logger.info(
-                "PPISP render-time per-frame values: heldout_params=%s, diag_csv=%s; %d camera frames (%d training), "
-                "camera ranges %s", self.config.heldout_params, self.config.diag_csv, len(self._g2t),
+                "PPISP render-time per-frame values: heldout_params=%s; %d camera frames (%d training), "
+                "camera ranges %s", self.config.heldout_params, len(self._g2t),
                 sum(1 for v in self._g2t if v >= 0), self._camera_ranges,
             )
 
@@ -634,32 +633,17 @@ class PPISPPostProcessing(BasePostProcessing):
         tb, ta = g2t[before], g2t[after]
         return (1 - w) * e[tb:tb + 1] + w * e[ta:ta + 1], (1 - w) * c[tb:tb + 1] + w * c[ta:ta + 1]
 
-    def _render_time_params(
-        self, rgb: torch.Tensor, resolution: tuple[int, int], camera_idx: int, training_frame_idx: int,
-        unique_frame_idx: int | None,
+    def _interp_params(
+        self, training_frame_idx: int, unique_frame_idx: int | None
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """heldout_params="interp" / diag_csv at render time: the per-frame values to use (None = the library's own
-        path), and the controller-vs-reference log."""
+        """heldout_params="interp" at render time: the frame's exposure [1] and colour [1, 8], its own fitted values
+        for a training frame, else interpolated (``_neighbour_params``); None = the library's own path."""
         if self.training or unique_frame_idx is None:
             return None
         if training_frame_idx >= 0:
-            ref = (self.ppisp.exposure_params[training_frame_idx:training_frame_idx + 1],
-                   self.ppisp.color_params[training_frame_idx:training_frame_idx + 1])
-        else:
-            ref = self._neighbour_params(unique_frame_idx)
-        if self.config.diag_csv and ref is not None and len(getattr(self.ppisp, "controllers", [])) > camera_idx:
-            with torch.no_grad():
-                w, h = resolution
-                e_ctrl, c_ctrl = self.ppisp.controllers[camera_idx](rgb.view(h, w, 3))
-            first = not os.path.exists(self.config.diag_csv)
-            with open(self.config.diag_csv, "a") as f:
-                if first:
-                    f.write("unique_frame_idx,camera_idx,training_frame_idx,exposure_ctrl,exposure_ref,color_l2\n")
-                f.write(f"{unique_frame_idx},{camera_idx},{training_frame_idx},{float(e_ctrl):.5f},"
-                        f"{float(ref[0].reshape(-1)[0]):.5f},{float((c_ctrl.reshape(-1) - ref[1].reshape(-1)).norm()):.5f}\n")
-        if self.config.heldout_params == "interp" and ref is not None:
-            return ref
-        return None
+            return (self.ppisp.exposure_params[training_frame_idx:training_frame_idx + 1],
+                    self.ppisp.color_params[training_frame_idx:training_frame_idx + 1])
+        return self._neighbour_params(unique_frame_idx)
 
     def _to_ppisp_config(self) -> PPISPConfig:
         """Convert NuRec's pydantic config to the library's PPISPConfig."""
@@ -730,8 +714,8 @@ class PPISPPostProcessing(BasePostProcessing):
             self._trained_rows.append(int(training_frame_idx))
 
         params = None
-        if self.config.heldout_params != "controller" or self.config.diag_csv:
-            params = self._render_time_params(rgb, resolution, unique_sensor_idx, training_frame_idx, unique_frame_idx)
+        if self.config.heldout_params == "interp":
+            params = self._interp_params(training_frame_idx, unique_frame_idx)
         if params is not None:  # heldout_params="interp": fitted or interpolated per-frame values, no controller
             transformed_rgb = ppisp_apply(
                 params[0].reshape(1), self.ppisp.vignetting_params, params[1].reshape(1, -1), self.ppisp.crf_params,

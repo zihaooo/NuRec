@@ -746,7 +746,7 @@ class GaussiansComposite(BaseModel, CompositeModel):
                 n_training_frames_per_camera=datasource.get_n_training_frames_per_camera().tolist(),
                 n_training_frames_per_lidar=[],
             )
-            # PPISP's render-time per-frame options (heldout_params / diag_csv) need the frame bookkeeping, which lives
+            # PPISP's render-time per-frame option (heldout_params) needs the frame bookkeeping, which lives
             # on the NCORE datasource (inside the DataSourceSummary the model is built with, when it has one)
             frame_source = getattr(datasource, "datasource", None) or datasource
             if hasattr(post_processing, "set_camera_frame_mapping") and hasattr(

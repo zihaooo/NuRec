@@ -1323,9 +1323,6 @@ class PPISPPostProcessingConfig(BasePostProcessingConfig):
     #   (by frame index) from the nearest training frames of the same camera before and after it. A diagnosis of
     #   the controller (and a "re-render the recorded drive" protocol); training is unaffected.
     heldout_params: Literal["controller", "interp"] = "controller"
-    # CSV to append, per rendered frame: the controller's exposure/colour against the fitted (training frame) or
-    # interpolated (held-out frame) values. Render-time only; None = off.
-    diag_csv: Optional[str] = None
 
 
 class PPISPLegacyPostProcessingConfig(BasePostProcessingConfig):
