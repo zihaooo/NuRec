@@ -542,7 +542,7 @@ class GaussiansSystem(BaseSystemSO):
         rendering restore everything from their checkpoint and skip it: there, lazy Gaussian layers are not
         materialized at setup. Fails loudly on a missing key or shape mismatch rather than training with a silently
         different model."""
-        cfg = getattr(self.cached_config.system, "init_parts", None)
+        cfg = self.cached_config.system.init_parts
         if cfg is None or getattr(self, "_init_parts_applied", False):
             return
         self._init_parts_applied = True
@@ -1193,7 +1193,7 @@ class GaussiansSystem(BaseSystemSO):
         out_types = []
         if self.config.test.save_results:
             all_results = ["pred_rgb", "pred_distance", "pred_normal", "pred_opacity"]
-            wanted = getattr(self.config.test, "result_types", None)
+            wanted = self.config.test.result_types
             out_types.extend([t for t in all_results if wanted is None or t in wanted])
         if self.config.test.save_inputs:
             out_types.extend(
@@ -2112,7 +2112,7 @@ class GaussiansSystem(BaseSystemSO):
 
     def _write_result_png(self, path: str, im: np.ndarray) -> None:
         """Write one result PNG, in a background thread if image_writer_threads > 0 (decoupled from rendering)."""
-        n_threads = int(getattr(self.config.test, "image_writer_threads", 0) or 0)
+        n_threads = self.config.test.image_writer_threads
         if n_threads <= 0:
             imageio.v2.imsave(path, im)
             return

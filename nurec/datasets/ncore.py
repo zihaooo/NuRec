@@ -1386,6 +1386,7 @@ class NCORESequentialDataset(NCOREDataset):
         self.lidar_frames: dict[str, list[int]] = {}
         self.return_lidar: bool
         self.return_camera: bool
+        self.load_rgb: bool
 
         if split == "val":
             self.n_image_subsample = config.n_val_image_subsample
@@ -1399,7 +1400,7 @@ class NCORESequentialDataset(NCOREDataset):
             lidar_exclude_frame_step = config.val_lidar_exclude_frame_step
             self.return_lidar = config.val_lidar
             self.return_camera = config.val_camera
-            self.load_rgb = bool(getattr(config, "val_load_rgb", True))
+            self.load_rgb = config.val_load_rgb
         elif split == "train-sequential":
             self.n_image_subsample = config.n_train_sequential_image_subsample
             camera_frame_start = config.train_sequential_camera_frame_start
@@ -1412,6 +1413,7 @@ class NCORESequentialDataset(NCOREDataset):
             lidar_exclude_frame_step = config.train_sequential_lidar_exclude_frame_step
             self.return_lidar = config.train_sequential_lidar
             self.return_camera = config.train_sequential_camera
+            self.load_rgb = True
         else:
             raise ValueError(f"Unexpected {split=}.")
 
@@ -1425,7 +1427,7 @@ class NCORESequentialDataset(NCOREDataset):
                 self.camera_frames[camera_id] = list(
                     datasource.camera_frame_ranges[camera_id][camera_frame_start::camera_frame_step]
                 )
-            frames_file = getattr(config, "val_camera_frames_file", None) if split == "val" else None
+            frames_file = config.val_camera_frames_file if split == "val" else None
             if frames_file:  # explicit local frame lists (place cells): replace the range for the cameras listed
                 with open(frames_file) as f:
                     listed = json.load(f)
@@ -1614,7 +1616,7 @@ class NCORESequentialDataset(NCOREDataset):
                         original_width=camera_width,
                         original_height=camera_height,
                     ),
-                    load_rgb=getattr(self, "load_rgb", True),
+                    load_rgb=self.load_rgb,
                 )
 
                 if T_camera_delta_rot is not None or transl_delta_m is not None:
