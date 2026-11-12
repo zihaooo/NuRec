@@ -306,7 +306,6 @@ class ModuleLosses(torch.nn.Module):
         rgb_pred: torch.Tensor = self.dummy_rgb
         rgb_factor: float = -1.0  # use -1 to indicate dummy tensors (like null tensors)
         ssim_factor: float = -1.0
-        rgb_pred_ssim: torch.Tensor = self.dummy_rgb
 
         if (run_rgb or run_ssim) and results.rendered_cam is not None:
             assert target.data.camera is not None, "Slang losses requires camera data for RGB/SSIM loss!"
@@ -314,12 +313,6 @@ class ModuleLosses(torch.nn.Module):
             rgb_gt = unpack_optional(target.data.camera.labels.rgb)  # [B_rgb,H_rgb,W_rgb,3]
             rgb_pred = unpack_optional(results.rendered_cam.rgb)  # [n_rays_rgb, 3]
             rgb_pred = rgb_pred.reshape_as(rgb_gt)  # [B_rgb,H_rgb,W_rgb,3]
-            # VastGaussian decoupled appearance: L1 sees the adjusted image, SSIM the render before it
-            extra = results.rendered_cam.extra_ray_signals
-            if extra is not None and extra.rgb_before_appearance is not None:
-                rgb_pred_ssim = extra.rgb_before_appearance.reshape_as(rgb_gt)
-            else:
-                rgb_pred_ssim = rgb_pred
             if run_rgb:
                 n_valid_rgb = target.data.camera.labels.n_valid_rgb
                 rgb_factor = 1.0 / n_valid_rgb if n_valid_rgb > 0 else 0.0
@@ -1053,7 +1046,7 @@ class ModuleLosses(torch.nn.Module):
                 )
                 with ScopedTimer("LossAggregator/ssim_ssim_mean"):
                     value = fused_ssim_loss_map(
-                        rgb_pred_ssim,
+                        rgb_pred,
                         rgb_gt,
                         unpack_optional(rgb_flags),
                         ssim_factor,

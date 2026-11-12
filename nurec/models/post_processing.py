@@ -22,7 +22,6 @@ from nurec.config.model import (
     BilateralGridPostProcessingConfig,
     DINOv2PEPostProcessingConfig,
     PPISPPostProcessingConfig,
-    VastAppearancePostProcessingConfig,
 )
 from nurec.config.trainer import TrainerConfig
 from nurec.models.base import BaseModel
@@ -414,83 +413,6 @@ class BilateralGridPerCamera(BasePostProcessing):
 BasePostProcessing.register_variant("bilateral-grid-per-camera", BilateralGridPerCamera)
 
 BilateralGridT = TypeVar("BilateralGridT", BilateralGridPerFrame, BilateralGridPerCamera)
-
-
-class VastAppearancePostProcessing(BasePostProcessing):
-    """VastGaussian's decoupled appearance modeling (Lin et al., CVPR 2024, Sec. 4.2).
-
-    During training only, the rendered image I_r (after any earlier post-processing) is downsampled by
-    ``downsample``, concatenated per pixel with a learnable per-image embedding, and turned by a CNN (a 3x3 conv, four
-    pixel-shuffle x2 upsampling blocks with 3x3 conv + ReLU, a bilinear resize to the full size, then two 3x3 convs)
-    into a per-pixel, per-channel map M; the adjusted image is I_a = I_r * M. The L1 loss sees I_a, the SSIM loss sees
-    I_r (``ExtraSignal.rgb_before_appearance``). Outside training (validation, novel views, export) it does nothing,
-    so it is discarded after optimization. The last conv starts at zero, so M starts as 1.
-    The CNN input is detached: the map compensates appearance and is not a path for geometry gradients.
-    """
-
-    config: VastAppearancePostProcessingConfig
-
-    def __init__(
-        self,
-        config: VastAppearancePostProcessingConfig,
-        trainer_config: TrainerConfig,
-        n_training_frames_per_camera: List[int],
-        n_training_frames_per_lidar: List[int],
-    ):
-        super().__init__(config, trainer_config, n_training_frames_per_camera, n_training_frames_per_lidar)
-        n_frames = max(1, sum(n_training_frames_per_camera))
-        dim = self.config.embedding_dim
-        self.embeddings = nn.Parameter(torch.randn(n_frames, dim) * 0.01)
-        channels = self.config.hidden_channels
-        layers: list[nn.Module] = [nn.Conv2d(3 + dim, channels, 3, padding=1)]
-        for _ in range(4):
-            layers += [nn.PixelShuffle(2), nn.Conv2d(channels // 4, channels // 2, 3, padding=1), nn.ReLU(inplace=True)]
-            channels //= 2
-        self.upsample = nn.Sequential(*layers)
-        self.head = nn.Sequential(
-            nn.Conv2d(channels, channels, 3, padding=1), nn.ReLU(inplace=True), nn.Conv2d(channels, 3, 3, padding=1)
-        )
-        nn.init.zeros_(self.head[-1].weight)
-        nn.init.zeros_(self.head[-1].bias)
-
-    def forward(
-        self,
-        results: GaussiansCompositeReturn,
-        rays: torch.Tensor | None = None,  # [N, 6]
-        pixel_coords: torch.Tensor | None = None,  # [N, 2]
-        resolution: tuple[int, int] | None = None,  # (width, height)
-        training_frame_idx: int | None = None,
-        unique_sensor_idx: int | None = None,
-        global_step: int = 0,
-    ) -> None:
-        if not self.training or rays is None or resolution is None or training_frame_idx is None or training_frame_idx < 0:
-            return
-        cam = results.rendered_cam
-        if cam is None or cam.rgb is None:
-            return
-        width, height = resolution
-        rgb = cam.rgb
-        if rgb.shape[0] != width * height:
-            return  # only full-image batches can be treated as images
-        if cam.extra_ray_signals is None:
-            cam.extra_ray_signals = ExtraSignal()
-        cam.extra_ray_signals.rgb_before_appearance = rgb
-        image = rgb.reshape(height, width, 3).permute(2, 0, 1).unsqueeze(0)
-        factor = self.config.downsample
-        small = torch.nn.functional.interpolate(
-            image.detach(), size=(max(1, height // factor), max(1, width // factor)), mode="area"
-        )
-        embedding = self.embeddings[training_frame_idx].view(1, -1, 1, 1).expand(-1, -1, *small.shape[2:])
-        features = self.upsample(torch.cat([small, embedding], 1))
-        features = torch.nn.functional.interpolate(features, size=(height, width), mode="bilinear", align_corners=False)
-        transform = 1.0 + self.head(features)
-        cam.rgb = (image * transform).squeeze(0).permute(1, 2, 0).reshape(-1, 3)
-
-    def configure_optimizers(self, name_prefix: str = "") -> List[OptimizerLRSchedulerConfig]:
-        return configure_optimizers(self.config.to_dictconfig(), self.trainer_config, self, name_prefix)
-
-
-BasePostProcessing.register_variant("vast-appearance", VastAppearancePostProcessing)
 
 
 # ppisp_legacy is intentionally retained: it is the target of the
