@@ -14,7 +14,6 @@ import torch.nn as nn
 
 from ppisp import PPISP as PPISPModule  # type: ignore[import-not-found]
 from ppisp import PPISPConfig  # type: ignore[import-not-found]
-from ppisp import ppisp_apply  # type: ignore[import-not-found]
 
 from nurec.config.model import (
     BasePostProcessingConfig,
@@ -717,7 +716,7 @@ class PPISPPostProcessing(BasePostProcessing):
         if self.config.heldout_params == "interp":
             params = self._interp_params(training_frame_idx, unique_frame_idx)
         if params is not None:  # heldout_params="interp": fitted or interpolated per-frame values, no controller
-            transformed_rgb = ppisp_apply(
+            transformed_rgb = ppisp_lib.ppisp_apply(
                 params[0].reshape(1), self.ppisp.vignetting_params, params[1].reshape(1, -1), self.ppisp.crf_params,
                 rgb, pixel_coords, resolution[0], resolution[1], unique_sensor_idx, 0,
             )

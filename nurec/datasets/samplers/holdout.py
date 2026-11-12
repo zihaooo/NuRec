@@ -373,7 +373,9 @@ class CoveragePlan:
         sensor_ids: list[str] = []
         unique_sensor_ids: list[str] = []
         per_sensor_frame_idxs: list[npt.NDArray[np.int64]] = []
-        repeats_file = frame_sampler_config.get("include_frames_repeats_file", None) if sensor_kind == "camera" else None
+        repeats_file = (
+            frame_sampler_config.get("include_frames_repeats_file", None) if sensor_kind == "camera" else None
+        )
         repeats = _load_include_frames_repeats_file(str(repeats_file)) if repeats_file else None
         for sensor_id in active_ids:
             frame_range = frame_ranges[sensor_id]

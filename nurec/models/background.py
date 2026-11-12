@@ -518,7 +518,9 @@ class SkyMlpBackground(BaseBackground):
         i = torch.clamp(torch.floor(x), 0, self.config.time_n_knots - 2).long()
         w = torch.clamp(x - i, 0.0, 1.0).float()[:, None]
         if not self._time_logged:
-            logging.getLogger(__name__).info(f"time-dependent sky: first frame at {float(x[0]) * self.config.time_knot_s:.3f} s from the origin")
+            logging.getLogger(__name__).info(
+                "time-dependent sky: first frame at %.3f s from the origin", float(x[0]) * self.config.time_knot_s
+            )
             self._time_logged = True
         return (1 - w) * self.time_knots[i] + w * self.time_knots[i + 1]
 

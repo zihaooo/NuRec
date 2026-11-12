@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import concurrent.futures
-import json
 import ctypes
+import json
 import logging
 import math
 import platform
@@ -1435,8 +1435,11 @@ class NCORESequentialDataset(NCOREDataset):
                     if camera_id in listed:
                         frame_range = list(datasource.camera_frame_ranges[camera_id])
                         self.camera_frames[camera_id] = [frame_range[i] for i in sorted(listed[camera_id])]
-                logger.info(f"val_camera_frames_file {frames_file}: frames per camera "
-                            f"{ {k: len(v) for k, v in self.camera_frames.items()} }")
+                logger.info(
+                    "val_camera_frames_file %s: frames per camera %s",
+                    frames_file,
+                    {k: len(v) for k, v in self.camera_frames.items()},
+                )
         else:
             assert camera_exclude_frame_start is not None, "camera_exclude_frame_start must be specified"
             assert camera_exclude_frame_step is not None, "camera_exclude_frame_step must be specified"

@@ -1239,7 +1239,8 @@ class ECADStrategyConfig(MCMCStrategyConfig):
         )
         keep_mcmc_noise: bool = Field(default=False, description="Keep MCMC's SGLD position noise (off in the paper).")
         init_confidence: float = Field(
-            default=0.0, description="Initial log-confidence gamma written to camera_extra_signal[:, 0] on a fresh start."
+            default=0.0,
+            description="Initial log-confidence gamma written to camera_extra_signal[:, 0] on a fresh start.",
         )
         log_every: int = Field(default=1000, ge=0, description="Print ECAD statistics every this many steps (0 = off).")
 

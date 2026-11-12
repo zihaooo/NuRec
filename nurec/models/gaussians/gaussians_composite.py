@@ -3719,7 +3719,9 @@ class GaussiansComposite(BaseModel, CompositeModel):
         data_camera = batch.data.camera
         meta = data_camera.meta[0] if data_camera is not None and data_camera.meta else None
         camera_name = (
-            self._camera_idx_to_name.get(int(meta.unique_sensor_idx), meta.logical_sensor_id) if meta is not None else None
+            self._camera_idx_to_name.get(int(meta.unique_sensor_idx), meta.logical_sensor_id)
+            if meta is not None
+            else None
         )
         ground_rgb = (cfg.ground_fill_rgb_per_camera or {}).get(camera_name or "", cfg.ground_fill_rgb)
         if ground_rgb is None:

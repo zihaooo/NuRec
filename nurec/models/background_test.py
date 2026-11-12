@@ -537,4 +537,6 @@ def test_swap_sky_for_ground_replaces_only_the_sky_share() -> None:
     # identity post-processing: the result is foreground + see-through share of the ground colour
     assert torch.allclose(swap_sky_for_ground(pre, pre, sky, see_through, [1.0, 1.0, 1.0]), torch.full((1, 3), 0.7))
     # a post-processing gain of 1.5 scales the removed sky share with it: 0.75 - 1.5 * 0.3 + 0.5 = 0.8
-    assert torch.allclose(swap_sky_for_ground(pre * 1.5, pre, sky, see_through, [1.0, 1.0, 1.0]), torch.full((1, 3), 0.8))
+    assert torch.allclose(
+        swap_sky_for_ground(pre * 1.5, pre, sky, see_through, [1.0, 1.0, 1.0]), torch.full((1, 3), 0.8)
+    )
