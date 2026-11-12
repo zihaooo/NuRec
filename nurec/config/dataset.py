@@ -327,11 +327,6 @@ class NCoreDatasetConfig(_BaseDatasetSOConfig):
         description="Camera frame step count for validation / test mode. Mutually exclusive with val_camera_exclude_frame_step, but one must be specified.",
         default=1,
     )
-    val_camera_frame_end: Optional[int] = Field(
-        description="Camera frame end index (exclusive) for validation / test mode with val_camera_frame_step; None = to "
-        "the last frame. Lets a multi-cell run render only one cell's frames (pipeline/multiclip/ncell, 2026-11-05).",
-        default=None,
-    )
     val_load_rgb: bool = Field(
         default=True,
         description="Decode each validation frame's camera image (the ground truth). False for render-only runs: the "
@@ -340,7 +335,7 @@ class NCoreDatasetConfig(_BaseDatasetSOConfig):
     )
     val_camera_frames_file: Optional[str] = Field(
         description="JSON file: camera id -> local camera frame indices to validate / render (as the coverage sampler's "
-        "include_frames_file). Overrides val_camera_frame_start/step/end for cameras it lists; for cells whose frames are "
+        "include_frames_file). Overrides val_camera_frame_start/step for cameras it lists; for cells whose frames are "
         "not contiguous, e.g. place cells over a revisited drive (pipeline/multiclip/ncell, 2026-11-06).",
         default=None,
     )

@@ -1391,7 +1391,6 @@ class NCORESequentialDataset(NCOREDataset):
             self.n_image_subsample = config.n_val_image_subsample
             camera_frame_start = config.val_camera_frame_start
             camera_frame_step = config.val_camera_frame_step
-            camera_frame_end = config.val_camera_frame_end
             camera_exclude_frame_start = config.val_camera_exclude_frame_start
             camera_exclude_frame_step = config.val_camera_exclude_frame_step
             lidar_frame_start = config.val_lidar_frame_start
@@ -1405,7 +1404,6 @@ class NCORESequentialDataset(NCOREDataset):
             self.n_image_subsample = config.n_train_sequential_image_subsample
             camera_frame_start = config.train_sequential_camera_frame_start
             camera_frame_step = config.train_sequential_camera_frame_step
-            camera_frame_end = None
             camera_exclude_frame_start = config.train_sequential_camera_exclude_frame_start
             camera_exclude_frame_step = config.train_sequential_camera_exclude_frame_step
             lidar_frame_start = config.train_sequential_lidar_frame_start
@@ -1425,7 +1423,7 @@ class NCORESequentialDataset(NCOREDataset):
             assert camera_frame_start is not None, "camera_frame_start must be specified"
             for camera_id in self.camera_ids:
                 self.camera_frames[camera_id] = list(
-                    datasource.camera_frame_ranges[camera_id][camera_frame_start:camera_frame_end:camera_frame_step]
+                    datasource.camera_frame_ranges[camera_id][camera_frame_start::camera_frame_step]
                 )
             frames_file = getattr(config, "val_camera_frames_file", None) if split == "val" else None
             if frames_file:  # explicit local frame lists (place cells): replace the range for the cameras listed
