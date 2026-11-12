@@ -495,6 +495,11 @@ class SkyMlpBackground(BaseBackground):
 
         n_input = self.dir_encoding.n_output_dims
         if self.config.time_knot_s > 0:
+            if isinstance(self, ExtraSignalSkyMlpBackground):  # its forward takes no frame timestamps
+                raise ValueError(
+                    f"[{self.__class__.__name__}] a time-dependent sky (time_knot_s > 0) is not supported; "
+                    "use the sky-mlp background or time_knot_s: 0"
+                )
             assert self.config.time_n_knots >= 2, "a time-dependent sky needs time_n_knots >= 2"
             self.time_knots = nn.Parameter(torch.zeros(self.config.time_n_knots, self.config.time_dim))
             n_input += self.config.time_dim
