@@ -428,25 +428,25 @@ def below_horizon_weight(rays_d: torch.Tensor, up: list[float], horizon_deg: flo
 
 def ground_fill(
     rays_d: torch.Tensor,
-    background_rgb: torch.Tensor,
-    ground_rgb: list[float],
+    rgb: torch.Tensor,
+    target_rgb: torch.Tensor,
     up: list[float],
     horizon_deg: float,
     blend_deg: float,
     mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Blend ``rgb`` ``[N, 3]`` (named ``background_rgb``) towards ``ground_rgb`` for world rays ``[N, 3]`` below the horizon.
+    """Blend ``rgb`` ``[N, 3]`` towards ``target_rgb`` (``[N, 3]``, or one colour ``[3]``) for world rays ``rays_d``
+    ``[N, 3]`` below the horizon.
 
     Rays at or above elevation ``horizon_deg`` (relative to ``up``'s horizontal plane) keep their colour. Below it
-    the ground weight rises linearly and reaches 1 at ``horizon_deg - blend_deg``, so no hard line shows where sky
-    meets ground fill and nothing above the horizon changes. ``mask`` ``[N]`` (boolean, or a weight in [0, 1])
-    multiplies the weight, e.g. to fill only masked pixels, and only the see-through part of each.
+    the weight rises linearly and reaches 1 at ``horizon_deg - blend_deg``, so no hard line shows where sky meets
+    ground fill and nothing above the horizon changes. ``mask`` (boolean, or a weight in [0, 1]; ``N`` elements in
+    any shape) multiplies the weight, e.g. to fill only masked pixels.
     """
-    weight = below_horizon_weight(rays_d, up, horizon_deg, blend_deg)[:, None]
+    weight = below_horizon_weight(rays_d, up, horizon_deg, blend_deg).to(rgb.dtype)
     if mask is not None:
-        weight = weight * mask.reshape(-1, 1).to(device=weight.device, dtype=weight.dtype)
-    ground = torch.tensor(ground_rgb, dtype=background_rgb.dtype, device=background_rgb.device).expand_as(background_rgb)
-    return torch.lerp(background_rgb, ground, weight.to(background_rgb.dtype))
+        weight = weight * mask.reshape(-1).to(device=weight.device, dtype=weight.dtype)
+    return torch.lerp(rgb, target_rgb, weight[:, None])
 
 
 def swap_sky_for_ground(

@@ -491,7 +491,7 @@ def test_ground_fill_replaces_only_rays_below_the_horizon() -> None:
     rays_d = torch.tensor([[1.0, 0.0, 1.0], [1.0, 0.0, 0.0], [1.0, 0.0, -0.0087268], [1.0, 0.0, -0.0174551],
                            [1.0, 0.0, -1.0], [0.0, 0.0, -1.0]])
     sky = torch.full((6, 3), 0.25)
-    out = ground_fill(rays_d, sky, [0.75, 0.5, 0.5], up=[0.0, 0.0, 1.0], horizon_deg=0.0, blend_deg=1.0)
+    out = ground_fill(rays_d, sky, torch.tensor([0.75, 0.5, 0.5]), up=[0.0, 0.0, 1.0], horizon_deg=0.0, blend_deg=1.0)
     weight = (out[:, 0] - 0.25) / 0.5
     assert torch.allclose(weight, torch.tensor([0.0, 0.0, 0.5, 1.0, 1.0, 1.0]), atol=1e-3)
     assert torch.equal(out[:2], sky[:2])  # the sky at and above the horizon is untouched
@@ -501,21 +501,21 @@ def test_ground_fill_replaces_only_rays_below_the_horizon() -> None:
 def test_ground_fill_follows_the_up_axis_and_unnormalised_rays() -> None:
     # with y as up, a ray pointing down y is ground and one along z is the horizon
     rays_d = torch.tensor([[0.0, -3.0, 0.0], [0.0, 0.0, 2.0]])
-    out = ground_fill(rays_d, torch.zeros(2, 3), [1.0, 1.0, 1.0], up=[0.0, 2.0, 0.0], horizon_deg=0.0, blend_deg=1.0)
+    out = ground_fill(rays_d, torch.zeros(2, 3), torch.ones(3), up=[0.0, 2.0, 0.0], horizon_deg=0.0, blend_deg=1.0)
     assert torch.allclose(out, torch.tensor([[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]]))
 
 
 def test_ground_fill_with_a_mask_changes_only_masked_rays() -> None:
     # two rays straight down; only the masked one (the ego hood) is filled
     rays_d = torch.tensor([[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]])
-    out = ground_fill(rays_d, torch.zeros(2, 3), [1.0, 1.0, 1.0], up=[0.0, 0.0, 1.0], horizon_deg=0.0, blend_deg=1.0,
+    out = ground_fill(rays_d, torch.zeros(2, 3), torch.ones(3), up=[0.0, 0.0, 1.0], horizon_deg=0.0, blend_deg=1.0,
                       mask=torch.tensor([True, False]))
     assert torch.equal(out, torch.tensor([[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]]))
 
 
 def test_ground_fill_weight_scales_the_fill() -> None:
-    # a fractional weight (the pixel's see-through share) moves the colour only that far
-    out = ground_fill(torch.tensor([[0.0, 0.0, -1.0]]), torch.zeros(1, 3), [1.0, 1.0, 1.0], up=[0.0, 0.0, 1.0],
+    # a fractional mask weight moves the colour only that far
+    out = ground_fill(torch.tensor([[0.0, 0.0, -1.0]]), torch.zeros(1, 3), torch.ones(3), up=[0.0, 0.0, 1.0],
                       horizon_deg=0.0, blend_deg=1.0, mask=torch.tensor([0.25]))
     assert torch.allclose(out, torch.full((1, 3), 0.25))
 

@@ -38,8 +38,8 @@ from nurec.models.background import (
     BaseBackground,
     SkyEnvMapBackground,
     SkyMlpBackground,
-    below_horizon_weight,
     erode_mask,
+    ground_fill,
     swap_sky_for_ground,
 )
 from nurec.models.base import BaseModel
@@ -3625,13 +3625,10 @@ class GaussiansComposite(BaseModel, CompositeModel):
                         out.rendered_cam.rgb[inactive] = 0.0
 
         # The ground fill (applied after post-processing) needs the image as it was before post-processing.
+        ground_fill_background = self._ground_fill_background() if render_background and not is_training_batch else None
         ground_fill_pre_pp_rgb = (
             out.rendered_cam.rgb.detach().clone()
-            if render_background
-            and not is_training_batch
-            and self._ground_fill_configured()
-            and out.rendered_cam is not None
-            and out.rendered_cam.rgb is not None
+            if ground_fill_background is not None and out.rendered_cam is not None and out.rendered_cam.rgb is not None
             else None
         )
 
@@ -3682,24 +3679,28 @@ class GaussiansComposite(BaseModel, CompositeModel):
                         **extra,
                     )
 
-        if ground_fill_pre_pp_rgb is not None:
-            self._maybe_apply_ground_fill(batch, out, ground_fill_pre_pp_rgb)
+        if ground_fill_background is not None and ground_fill_pre_pp_rgb is not None:
+            self._maybe_apply_ground_fill(ground_fill_background, batch, out, ground_fill_pre_pp_rgb)
 
         if clamp_output:
             self._maybe_saturate_rgb(out)
 
         return out
 
-    def _ground_fill_configured(self) -> bool:
-        """Whether the sky background has a ground-fill colour set (``SkyMlpBackgroundConfig.ground_fill_*``)."""
+    def _ground_fill_background(self) -> SkyMlpBackground | None:
+        """The sky background if a ground-fill colour is set (``SkyMlpBackgroundConfig.ground_fill_*``), else None."""
         background = self.background
         if not isinstance(background, SkyMlpBackground):
-            return False
+            return None
         cfg = background.config
-        return cfg.ground_fill_rgb is not None or bool(cfg.ground_fill_rgb_per_camera)
+        return background if cfg.ground_fill_rgb is not None or bool(cfg.ground_fill_rgb_per_camera) else None
 
     def _maybe_apply_ground_fill(
-        self, batch: DataAndRenderingBatch, out: GaussiansCompositeReturn, pre_pp_rgb: torch.Tensor
+        self,
+        background: SkyMlpBackground,
+        batch: DataAndRenderingBatch,
+        out: GaussiansCompositeReturn,
+        pre_pp_rgb: torch.Tensor,
     ) -> None:
         """The sky background's render-time ground fill (``SkyMlpBackgroundConfig.ground_fill_*``).
 
@@ -3710,9 +3711,6 @@ class GaussiansComposite(BaseModel, CompositeModel):
         pixel's post-processing gain (final / ``pre_pp_rgb``, the image before post-processing). A no-op unless a
         ground colour is set for this camera.
         """
-        background = self.background
-        if not isinstance(background, SkyMlpBackground):
-            return
         cfg = background.config
         rendering_camera = batch.rendering.camera if batch.rendering is not None else None
         rendered = out.rendered_cam
@@ -3731,9 +3729,7 @@ class GaussiansComposite(BaseModel, CompositeModel):
         if see_through.shape[0] != rgb.shape[0]:
             return
         rays_d = rendering_camera.rays[..., 3:].reshape(-1, 3)
-        weight = below_horizon_weight(
-            rays_d, cfg.ground_fill_up, cfg.ground_fill_horizon_deg, cfg.ground_fill_blend_deg
-        ).to(rgb.dtype)
+        mask = None
         if cfg.ground_fill_masked_only:
             # pixels the dataset marks invalid (the ego hood), shrunk so the fill stays inside narrower metric masks
             if data_camera is None or data_camera.labels.flags is None:
@@ -3741,8 +3737,7 @@ class GaussiansComposite(BaseModel, CompositeModel):
             invalid = data_camera.labels.get_mask_flags_any(RayFlags.INVALID)
             if invalid.numel() != rgb.shape[0]:
                 return
-            invalid = erode_mask(invalid.reshape(rendering_camera.h, rendering_camera.w), cfg.ground_fill_mask_erode_px)
-            weight = weight * invalid.reshape(-1).to(device=weight.device, dtype=weight.dtype)
+            mask = erode_mask(invalid.reshape(rendering_camera.h, rendering_camera.w), cfg.ground_fill_mask_erode_px)
         extra = rendered.extra_ray_signals
         sky = extra.rgb_background if extra is not None else None
         if sky is not None and sky.numel() == rgb.numel() and not background.composite_in_linear_space:
@@ -3752,7 +3747,9 @@ class GaussiansComposite(BaseModel, CompositeModel):
         else:  # no stored sky colour: move the pixel towards the ground colour by its see-through share
             ground = torch.tensor(ground_rgb, dtype=rgb.dtype, device=rgb.device)
             target = torch.lerp(rgb, ground.expand_as(rgb), see_through)
-        filled = torch.lerp(rgb, target, weight[:, None])
+        filled = ground_fill(
+            rays_d, rgb, target, cfg.ground_fill_up, cfg.ground_fill_horizon_deg, cfg.ground_fill_blend_deg, mask=mask
+        )
         rendered.rgb = filled.reshape(rendered.rgb.shape)
 
     def _maybe_saturate_rgb(self, out: GaussiansCompositeReturn) -> None:
