@@ -1302,11 +1302,6 @@ class PPISPPostProcessingConfig(BasePostProcessingConfig):
     # dense Adam keeps moving a row on momentum after each of its rare samples (~5 per image in an 80 s stage 2),
     # which left isolated over-exposed frames (+0.2 to +0.6 exposure). False: the library's dense Adam.
     ppisp_row_selective: bool = False
-    # With ppisp_row_selective: the per-frame rows' learning rate and the dense (per-camera) parameters' learning rate
-    # as multiples of the scheduled ppisp_lr (2026-11-09; a per-frame refit against a frozen model uses e.g. rows x10,
-    # dense x0 = vignetting / CRF kept).
-    ppisp_row_lr_scale: float = 1.0
-    ppisp_dense_lr_scale: float = 1.0
 
     # Controller optimizer (forwarded to ppisp.PPISPConfig)
     controller_lr: float = 0.001
