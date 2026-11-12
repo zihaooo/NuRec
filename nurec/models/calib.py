@@ -199,6 +199,78 @@ class FreePoseCalib(BaseCalib):
         )
 
 
+class ImagePoseResiduals(nn.Module):
+    """mcity multiclip (2026-11-11): one small camera-frame rotation per camera frame (rows = the camera view geometry's
+    unique frame index, all cameras, training and held out), zero-initialised, radially bounded. See
+    ImagePoseCalibConfig."""
+
+    def __init__(self, n_rows: int, row_camera: torch.Tensor, max_rotation_rad: float) -> None:
+        super().__init__()
+        self.residuals = nn.Parameter(torch.zeros(n_rows, 3, dtype=torch.float32))
+        self.row_camera = nn.Buffer(row_camera.to(torch.int64), persistent=False)
+        self.n_cameras = int(row_camera.max().item()) + 1 if row_camera.numel() else 0
+        self.max_rotation_rad = float(max_rotation_rad)
+
+    def bounded(self, w: torch.Tensor) -> torch.Tensor:
+        n = torch.linalg.vector_norm(w, dim=-1, keepdim=True)
+        return w * torch.clamp(self.max_rotation_rad / n.clamp_min(1e-12), max=1.0)
+
+    def matrix(self, row: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        """4x4 rotation of one row. The rotation is bounded to a fraction of a degree, so the exponential map's series
+        to fourth order is exact in float32 and stays smooth (with the right gradient) through zero."""
+        w = self.bounded(self.residuals[row]).to(dtype=dtype, device=device)
+        t2 = (w * w).sum()
+        a = 1.0 - t2 / 6.0 + t2 * t2 / 120.0  # sin(t) / t
+        b = 0.5 - t2 / 24.0 + t2 * t2 / 720.0  # (1 - cos(t)) / t^2
+        z = torch.zeros((), dtype=dtype, device=device)
+        k = torch.stack([torch.stack([z, -w[2], w[1]]), torch.stack([w[2], z, -w[0]]), torch.stack([-w[1], w[0], z])])
+        r = torch.eye(3, dtype=dtype, device=device) + a * k + b * (k @ k)
+        out = torch.eye(4, dtype=dtype, device=device)
+        out = torch.cat([torch.cat([r, out[:3, 3:]], dim=1), out[3:]], dim=0)
+        return out
+
+
+class _RowAdam(torch.optim.Optimizer):
+    """Adam that updates only the rows trained this step, each row with its own step count (as PPISP's
+    RowSelectiveAdam, for one tensor). Rows not trained keep their values and moments."""
+
+    def __init__(self, params, *, lr: float, rows_fn, betas=(0.9, 0.99), eps: float = 1e-15):
+        super().__init__(params, dict(lr=lr, betas=tuple(betas), eps=eps))
+        self._rows_fn = rows_fn
+
+    @torch.no_grad()
+    def step(self, closure=None):  # type: ignore[override]
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        rows = self._rows_fn()
+        if rows is None or rows.numel() == 0:
+            return loss
+        for group in self.param_groups:
+            lr, (b1, b2), eps = group["lr"], group["betas"], group["eps"]
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                st = self.state[p]
+                if not st:
+                    st["exp_avg"] = torch.zeros_like(p)
+                    st["exp_avg_sq"] = torch.zeros_like(p)
+                    st["step"] = torch.zeros(p.shape[0], dtype=torch.float32, device=p.device)
+                r = rows.to(p.device)
+                g = p.grad[r]
+                m = st["exp_avg"][r].mul_(b1).add_(g, alpha=1 - b1)
+                v = st["exp_avg_sq"][r].mul_(b2).addcmul_(g, g, value=1 - b2)
+                s = st["step"][r] + 1
+                bc1 = (1 - torch.pow(b1, s)).view(-1, 1)
+                bc2 = (1 - torch.pow(b2, s)).view(-1, 1)
+                p[r] = p[r] - lr * (m / bc1) / ((v / bc2).sqrt() + eps)
+                st["exp_avg"][r] = m
+                st["exp_avg_sq"][r] = v
+                st["step"][r] = s
+        return loss
+
+
 class RigCalib(BaseCalib):
     """Composite rig-trajectory spline and static per-camera extrinsic calibration."""
 
@@ -286,11 +358,31 @@ class RigCalib(BaseCalib):
             self.camera_extrinsics = None
         self.camera_extrinsic_indices = nn.Buffer(camera_extrinsic_indices, persistent=False)
 
+        self.image_pose: ImagePoseResiduals | None = None
+        self._image_pose_rows: list[int] = []
+        self._image_pose_live = False
+        ip = config.image_pose
+        if ip is not None and ip.enabled and config.camera.enabled:
+            ranges = camera_view_geometry.get_frame_ranges_per_sensor()
+            n_rows = int(camera_view_geometry.T_sensor_world_startend_allviews.shape[0])
+            row_camera = torch.zeros(n_rows, dtype=torch.int64)
+            for cam_idx, frame_range in enumerate(ranges.values()):
+                row_camera[frame_range.start:frame_range.stop] = cam_idx
+            self.image_pose = ImagePoseResiduals(n_rows, row_camera, math.radians(ip.max_rotation_degrees))
+            self.image_pose_trained = nn.Buffer(torch.zeros(n_rows, dtype=torch.bool), persistent=False)
+            log.info(
+                "image pose: per-image camera rotation on %d camera frames (%d cameras), bound %.3f deg, lr %g from "
+                "step %d, prior %g x (w / %.3f deg)^2, per-camera mean %g",
+                n_rows, self.image_pose.n_cameras, ip.max_rotation_degrees, ip.lr, ip.start_global_step,
+                ip.prior_weight, ip.prior_rotation_degrees, ip.mean_weight,
+            )
+
         log.info(
-            "RigCalib: %d trajectories, rig spline %s, camera extrinsics %s",
+            "RigCalib: %d trajectories, rig spline %s, camera extrinsics %s, image pose %s",
             len(rig_trajectories.rig_trajectories),
             "ON" if self.rig_spline is not None else "OFF",
             "ON" if self.camera_extrinsics is not None else "OFF",
+            "ON" if self.image_pose is not None else "OFF",
         )
 
     @staticmethod
@@ -400,6 +492,7 @@ class RigCalib(BaseCalib):
         sensor_type: str,
         apply_rig_trajectory: bool,
         apply_camera_extrinsics: bool,
+        image_row: int = -1,
     ) -> torch.Tensor:
         trajectory_indices = (
             self.camera_trajectory_indices if sensor_type == "camera" else self.lidar_trajectory_indices
@@ -428,6 +521,8 @@ class RigCalib(BaseCalib):
             if residual_idx < 0:
                 raise IndexError(f"No camera extrinsic mapping for sensor index {lookup_index}")
             correction = correction @ self.camera_extrinsics(residual_idx)
+        if image_row >= 0 and self.image_pose is not None:  # per-image rotation, last, in the camera frame
+            correction = correction @ self.image_pose.matrix(image_row, base_poses.dtype, base_poses.device)
 
         correction_nurec = correction.clone()
         correction_nurec[..., :3, 3] = correction[..., :3, 3] * self.nurec_scale
@@ -445,6 +540,12 @@ class RigCalib(BaseCalib):
             if not sensor_enabled:
                 return base_poses
             lookup_index = meta.unique_sensor_idx if meta.unique_sensor_idx >= 0 else 0
+            image_row = -1
+            if sensor_type == "camera" and self.image_pose is not None:
+                image_row = int(meta.unique_frame_idx)
+                if self._image_pose_live and self.training and torch.is_grad_enabled() and meta.training_frame_idx >= 0:
+                    self._image_pose_rows.append(image_row)
+                    self.image_pose_trained[image_row] = True
             return self._correct_sensor_poses(
                 base_poses,
                 timestamps_us,
@@ -452,6 +553,7 @@ class RigCalib(BaseCalib):
                 sensor_type=sensor_type,
                 apply_rig_trajectory=rig_trajectory.enabled,
                 apply_camera_extrinsics=sensor_type == "camera" and camera_extrinsics.enabled,
+                image_row=image_row,
             )
 
         # Both early returns above leave the poses numerically unchanged, so only the final branch
@@ -486,6 +588,59 @@ class RigCalib(BaseCalib):
         return RenderingBatch(camera=rendering_data_camera, lidar=rendering_data_lidar)
 
     def regularization_loss(self) -> tuple[str, torch.Tensor, float] | None:
+        spline = self._spline_regularization()
+        if self.image_pose is None or not self._image_pose_live:
+            return spline
+        image = self._image_pose_regularization()
+        if image is None:
+            return spline
+        if spline is None:
+            return "image_pose_prior", image, 1.0
+        name, value, weight = spline
+        return f"{name}_image_pose", weight * value + image, 1.0
+
+    def _image_pose_regularization(self) -> torch.Tensor | None:
+        """L2 prior to zero over the rows trained so far, plus each camera's mean correction (a constant per-camera
+        offset belongs to the extrinsic residual), both in units of prior_rotation_degrees."""
+        ip = self.config.image_pose
+        assert ip is not None and self.image_pose is not None
+        mask = self.image_pose_trained
+        if not bool(mask.any()):
+            return None
+        sigma = math.radians(ip.prior_rotation_degrees)
+        w = self.image_pose.bounded(self.image_pose.residuals[mask]) / sigma
+        value = ip.prior_weight * (w * w).sum(-1).mean()
+        if ip.mean_weight > 0.0:
+            cams = self.image_pose.row_camera[mask]
+            sums = torch.zeros(self.image_pose.n_cameras, 3, dtype=w.dtype, device=w.device).index_add_(0, cams, w)
+            counts = torch.bincount(cams, minlength=self.image_pose.n_cameras).clamp_min(1).to(w.dtype)
+            means = sums / counts[:, None]
+            value = value + ip.mean_weight * (means * means).sum()
+        return value
+
+    def _pop_image_pose_rows(self) -> torch.Tensor | None:
+        """The image rows trained since the last optimizer step (unique), then forgotten; None if none."""
+        if not self._image_pose_rows or self.image_pose is None:
+            return None
+        rows = torch.tensor(sorted(set(self._image_pose_rows)), dtype=torch.long, device=self.image_pose.residuals.device)
+        self._image_pose_rows.clear()
+        self.image_pose_trained[rows] = True
+        return rows
+
+    def configure_optimizers(self, name_prefix: str = "") -> list[OptimizerLRSchedulerConfig]:
+        if self.image_pose is None:
+            return super().configure_optimizers(name_prefix)
+        # the configured (dense) optimizer gets every calib parameter except the per-image table, which has its own
+        # row-selective Adam: rows not trained in a step keep their values and moments
+        others = nn.ModuleList([m for n, m in self.named_children() if n != "image_pose"])
+        assert not list(self._parameters.values()), "RigCalib has direct parameters; list them here"
+        ret = configure_optimizers(self.config.to_dictconfig(), self.trainer_config, others, name_prefix)
+        ip = self.config.image_pose
+        assert ip is not None
+        ret.append({"optimizer": _RowAdam([self.image_pose.residuals], lr=ip.lr, rows_fn=self._pop_image_pose_rows)})
+        return ret
+
+    def _spline_regularization(self) -> tuple[str, torch.Tensor, float] | None:
         rig_trajectory = self.config.rig_trajectory
         assert rig_trajectory is not None
         if self.rig_spline is None:
@@ -513,6 +668,19 @@ class RigCalib(BaseCalib):
 
     def update_step_train_batch_start(self, epoch: int, global_step: int, system, **kwargs) -> dict[str, torch.Tensor]:
         ret = super().update_step_train_batch_start(epoch, global_step, system, **kwargs)
+        if self.image_pose is not None:
+            ip = self.config.image_pose
+            assert ip is not None
+            self._image_pose_live = self.enabled and global_step >= adjust_step_for_world_size(
+                self.trainer_config, ip.start_global_step
+            )
+            self.image_pose.residuals.requires_grad_(self._image_pose_live)
+            if self._image_pose_live and global_step % 100 == 0:
+                mask = self.image_pose_trained
+                if bool(mask.any()):
+                    w = torch.rad2deg(self.image_pose.bounded(self.image_pose.residuals.detach()[mask]))
+                    system.log("calib/image_pose_rms_deg", float(w.pow(2).sum(-1).mean().sqrt()), prog_bar=False)
+                    system.log("calib/image_pose_trained_rows", float(mask.sum()), prog_bar=False)
         if self.rig_spline is not None:
             for name, value in self.rig_spline.statistics().items():
                 system.log(f"calib/rig_spline_{name}", value, prog_bar=False)

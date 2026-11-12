@@ -2469,6 +2469,12 @@ class GaussiansSystem(BaseSystemSO):
                 f"model.calib.{k}": v for k, v in self.model.calib.state_dict().items() if ".sensor_models." in k
             }
             updated_state_dict.update(calib_sensor_models)
+            # mcity multiclip: a checkpoint without the per-image rotation table (e.g. the coarse start of a cell)
+            # loads it as the module's zeros
+            image_pose = getattr(self.model.calib, "image_pose", None)
+            key = "model.calib.image_pose.residuals"
+            if image_pose is not None and key not in updated_state_dict:
+                updated_state_dict[key] = image_pose.residuals.detach().clone()
 
         return super().load_state_dict(updated_state_dict, *args, **kwargs)
 

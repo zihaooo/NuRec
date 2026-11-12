@@ -68,6 +68,23 @@ class CameraExtrinsicsCalibConfig(BaseConfigSchema):
     freeze: bool = False
 
 
+class ImagePoseCalibConfig(BaseConfigSchema):
+    """mcity multiclip (2026-11-11): a small per-image camera rotation on top of the rig spline and the camera mounting
+    (rig_calib only), for per-camera, per-frame motion the rig model cannot represent (e.g. the mcity front camera's
+    pitch jitter). One rotation vector (radians, OpenCV camera frame) per camera frame, zero at start, applied last:
+    T_rig_world(t) . Sp(t) . S_c . E_c . R(w_image). Trained only on the frames a step trains (row-selective Adam), with
+    an L2 prior to zero and a penalty on each camera's mean correction (a constant per-camera offset belongs to E_c).
+    Frames never trained (held out) keep a zero correction."""
+
+    enabled: bool = False
+    max_rotation_degrees: float = Field(default=0.1, gt=0.0, le=10.0)  # radial bound per image
+    lr: float = Field(default=3.0e-5, gt=0.0)  # Adam step, radians
+    start_global_step: int = Field(default=1000, ge=0)
+    prior_weight: float = Field(default=1.0e-4, ge=0.0)  # x mean over trained rows of |w / prior_rotation|^2
+    prior_rotation_degrees: float = Field(default=0.02, gt=0.0)
+    mean_weight: float = Field(default=1.0e-2, ge=0.0)  # x sum over cameras of |mean_c w / prior_rotation|^2
+
+
 class CalibConfig(BaseConfigSchema):
     """Calibration component configuration."""
 
@@ -86,6 +103,7 @@ class CalibConfig(BaseConfigSchema):
     # Composite rig-calibration components. Other calibration modes leave these unset.
     rig_trajectory: RigTrajectoryCalibConfig | None = None
     camera_extrinsics: CameraExtrinsicsCalibConfig | None = None
+    image_pose: ImagePoseCalibConfig | None = None  # mcity multiclip: per-image camera rotation (off when None)
 
     # Optimizer and scheduler configs
     optimizer: OptimizerConfig | None = None
