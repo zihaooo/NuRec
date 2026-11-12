@@ -422,9 +422,6 @@ class CoveragePlan:
 
 
 class CoverageFrameSampler(BaseFrameSampler):
-    # training_frame_mask takes the sensor id (for include_frames_file); see BaseFrameSampler.group_training_frame_mask
-    TRAINING_FRAME_MASK_PER_SENSOR = True
-
     """Coverage-guaranteeing frame sampler, with an OPTIONAL hold-out split.
 
     The uniform / timestamp samplers draw one frame per step i.i.d. (with replacement across steps), so
@@ -453,6 +450,9 @@ class CoverageFrameSampler(BaseFrameSampler):
     injected (single-sensor training, or direct unit use) it falls back to a one-sensor coverage cycle,
     which is correct precisely because the single sensor is drawn every step.
     """
+
+    # training_frame_mask takes the sensor id (for include_frames_file); see BaseFrameSampler.group_training_frame_mask
+    TRAINING_FRAME_MASK_PER_SENSOR = True
 
     def __init__(self, config: DictConfig, dataset: NCORETrainDataset):
         super().__init__(config, dataset)
