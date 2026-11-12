@@ -547,7 +547,7 @@ class BaseGaussianModel(BaseModel, ABC):
 
         optimizers = configure_optimizers(self.config.to_dictconfig(), self.trainer_config, self, name_prefix)
 
-        # mcity multiclip: an explicit extent for the position learning rate (a cell on part of a larger dataset)
+        # pos_lr_scene_extent: an explicit extent for the position learning rate (e.g. a cell on part of a dataset)
         lr_extent = self.config.pos_lr_scene_extent or self.scene_extent
         if self.config.scale_pos_lr_by_scene_extent and lr_extent != self.scene_extent:
             log.info(

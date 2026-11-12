@@ -40,20 +40,19 @@ class RigTrajectoryCalibConfig(BaseConfigSchema):
     curvature_l1_weight: float = Field(default=0.0001, ge=0.0)
     curvature_translation_normalization_m_s2: float = Field(default=2.0, gt=0.0)
     curvature_rotation_normalization_degrees_s2: float = Field(default=20.0, gt=0.0)
-    # mcity multiclip (2026-11-08): a run that trains only some of its dataset's frames (a whole-drive place cell via
-    # the camera frame sampler's include_frames_file) keeps the dataset's global spline, one time axis shared by every
-    # cell, but optimises only the knots its frames use. JSON {camera_id: [frame index, ...]} (or a list of frame
-    # indices for every camera) of the frames whose poses the run uses, training and held out. Knots outside their
-    # B-spline support get no gradient and are left out of the curvature mean, so the curvature weight acts as in a
-    # dataset of just those frames. None: every knot (NuRec's behaviour).
+    # JSON {camera_id: [frame index, ...]} (or one list of frame indices for every camera) of the frames whose poses
+    # this run uses, training and held out. Only the knots supporting those frames are optimised; the others get no
+    # gradient and are left out of the curvature mean, so a run on part of a dataset (e.g. one cell of a multi-cell
+    # reconstruction) keeps the dataset's global spline and time axis and the curvature weight acts as in a dataset
+    # of just those frames. None (default): every knot, NuRec's behaviour.
     active_frames_file: Optional[str] = None
-    # Anchor the active knots to their values when training starts (e.g. the coarse model's refined trajectory loaded
-    # by a weights-only resume), so a cell makes small local corrections without drifting to its own global offset:
-    # group L1 of the deviation, translation / anchor_translation_m + rotation / anchor_rotation_degrees, mean over the
-    # active knots, times anchor_weight. 0: off.
+    # Weight of a loss anchoring the active knots to their values when training starts (e.g. a trajectory loaded by a
+    # weights-only resume), so a cell makes small local corrections instead of drifting to its own global offset: the
+    # group L1 deviation, translation / anchor_translation_m + rotation / anchor_rotation_degrees, averaged over the
+    # active knots. 0 (default): off.
     anchor_weight: float = Field(default=0.0, ge=0.0)
-    anchor_translation_m: float = Field(default=0.02, gt=0.0)
-    anchor_rotation_degrees: float = Field(default=0.05, gt=0.0)
+    anchor_translation_m: float = Field(default=0.02, gt=0.0)  # knot translation deviation that counts as 1
+    anchor_rotation_degrees: float = Field(default=0.05, gt=0.0)  # knot rotation deviation that counts as 1
 
 
 class CameraExtrinsicsCalibConfig(BaseConfigSchema):
@@ -63,25 +62,25 @@ class CameraExtrinsicsCalibConfig(BaseConfigSchema):
     gauge: Literal["mean-zero-per-trajectory"] = "mean-zero-per-trajectory"
     max_translation_m: float = Field(default=0.10, gt=0.0, le=100.0)
     max_rotation_degrees: float = Field(default=3.0, gt=0.0, le=180.0)
-    # mcity multiclip (2026-11-08): keep the loaded residuals (no gradient), e.g. every whole-drive cell keeps the
-    # coarse model's camera extrinsics, so the cells share one calibration.
+    # Keep the loaded residuals fixed (no gradient), e.g. so every cell of a multi-cell reconstruction keeps the
+    # coarse model's camera extrinsics and the cells share one calibration. Off by default.
     freeze: bool = False
 
 
 class ImagePoseCalibConfig(BaseConfigSchema):
-    """mcity multiclip (2026-11-11): a small per-image camera rotation on top of the rig spline and the camera mounting
-    (rig_calib only), for per-camera, per-frame motion the rig model cannot represent (e.g. the mcity front camera's
-    pitch jitter). One rotation vector (radians, OpenCV camera frame) per camera frame, zero at start, applied last:
+    """A small per-image camera rotation on top of the rig spline and the camera mounting (rig_calib only), for
+    per-camera, per-frame motion the rig model cannot represent (e.g. a camera's pitch jitter). One rotation vector
+    (radians, OpenCV camera frame) per camera frame, zero at start, applied last:
     T_rig_world(t) . Sp(t) . S_c . E_c . R(w_image). Trained only on the frames a step trains (row-selective Adam), with
     an L2 prior to zero and a penalty on each camera's mean correction (a constant per-camera offset belongs to E_c).
     Frames never trained (held out) keep a zero correction."""
 
-    enabled: bool = False
+    enabled: bool = False  # off by default; needs the camera calibration enabled too
     max_rotation_degrees: float = Field(default=0.1, gt=0.0, le=10.0)  # radial bound per image
     lr: float = Field(default=3.0e-5, gt=0.0)  # Adam step, radians
-    start_global_step: int = Field(default=1000, ge=0)
+    start_global_step: int = Field(default=1000, ge=0)  # step from which the rotations and their penalties are live
     prior_weight: float = Field(default=1.0e-4, ge=0.0)  # x mean over trained rows of |w / prior_rotation|^2
-    prior_rotation_degrees: float = Field(default=0.02, gt=0.0)
+    prior_rotation_degrees: float = Field(default=0.02, gt=0.0)  # rotation that counts as 1 in both penalties
     mean_weight: float = Field(default=1.0e-2, ge=0.0)  # x sum over cameras of |mean_c w / prior_rotation|^2
 
 
@@ -103,7 +102,7 @@ class CalibConfig(BaseConfigSchema):
     # Composite rig-calibration components. Other calibration modes leave these unset.
     rig_trajectory: RigTrajectoryCalibConfig | None = None
     camera_extrinsics: CameraExtrinsicsCalibConfig | None = None
-    image_pose: ImagePoseCalibConfig | None = None  # mcity multiclip: per-image camera rotation (off when None)
+    image_pose: ImagePoseCalibConfig | None = None  # per-image camera rotation (off when None)
 
     # Optimizer and scheduler configs
     optimizer: OptimizerConfig | None = None
@@ -174,33 +173,36 @@ class SkyMlpBackgroundConfig(BaseBackgroundConfig):
 
     # Ground fill, a render-time option that training never uses: rays pointing below the horizon see ground, not
     # sky, so the MLP's colour there is a guess that shows wherever the Gaussians are see-through (holes under the
-    # ego hood). With a colour set, evaluation and validation renders move those pixels towards it by their
-    # see-through share, on the final image after post-processing (GaussiansComposite._maybe_apply_ground_fill).
+    # ego hood). With a colour set, evaluation and validation renders swap the sky's share of those pixels,
+    # (1 - opacity) * sky colour, for (1 - opacity) * ground colour, on the final image after post-processing
+    # (GaussiansComposite._maybe_apply_ground_fill). Off by default (no colour set).
     ground_fill_rgb: list[float] | None = None  # RGB in [0, 1] in final-image colours, e.g. sampled from photos
-    ground_fill_rgb_per_camera: dict[str, list[float]] | None = None  # by camera (logical sensor) name; overrides
+    # Ground colours by camera (logical sensor) name; a listed camera uses its own instead of ground_fill_rgb.
+    ground_fill_rgb_per_camera: dict[str, list[float]] | None = None
     ground_fill_up: list[float] = [0.0, 0.0, 1.0]  # world up axis
     ground_fill_horizon_deg: float = 0.0  # rays at or above this elevation keep their colour ...
     ground_fill_blend_deg: float = Field(default=1.0, gt=0.0)  # ... below it the ground colour fades in over this
-    # Fill only pixels the dataset marks invalid (the ego hood and other masked pixels, which metrics skip). The sky
-    # MLP also draws part of see-through road, lane markings above all, so filling every ground ray changes scored
-    # pixels: -0.2 dB held-out on a camera-only mcity run. Without a ray mask nothing is filled.
+    # Fill only pixels the dataset marks invalid (the ego hood and other masked pixels, which metrics skip); without
+    # a ray mask nothing is filled. On by default: the sky MLP also draws part of see-through road (lane markings
+    # above all), so filling every ground ray changes scored pixels.
     ground_fill_masked_only: bool = True
     # Shrink that mask by this many pixels first, so the fill stays inside a narrower mask an external scorer uses
-    # (mcity: NuRec's ego mask is ~15 px wider than the scorer's hood mask at 960x600; use 16).
+    # (mcity at 960x600: NuRec's ego mask is ~15 px wider than the scorer's hood mask, so 16). 0 (default): as is.
     ground_fill_mask_erode_px: int = Field(default=0, ge=0)
-    # Detach the ray directions the sky sees, so its colour gradients never reach the camera poses (rig_calib). A sky
-    # frozen from another run is a fixed, detailed function of direction: its gradients pull the camera rotations
-    # towards wherever it fits best (mcity 40 s: a frozen sky trained without Gaussians moved the mountings 1.6-3 deg).
+    # Detach the ray directions the sky sees, so its colour gradients never reach the camera poses (rig_calib). Meant
+    # for a sky frozen from another run: a fixed, detailed function of direction whose gradients would pull the camera
+    # rotations towards wherever it fits best. Off by default.
     detach_ray_directions: bool = False
-    # Time-dependent sky (pipeline/multiclip/sky_stage1.py, 2026-11-05): time_n_knots latent codes of time_dim numbers,
-    # one every time_knot_s seconds from time_origin_us, linearly interpolated at each frame's mid timestamp and
-    # appended to the direction features before the MLP (whose input grows by time_dim). 0 = direction only.
+    # Time-dependent sky (sky-mlp background only): time_n_knots (>= 2) latent codes of time_dim numbers, one every
+    # time_knot_s seconds from time_origin_us (a timestamp in us), linearly interpolated at each frame's mid timestamp
+    # (flat outside the knots) and appended to the direction features before the MLP, whose input grows by time_dim.
+    # time_knot_s 0 (default): direction only, NuRec's sky.
     time_knot_s: float = 0.0
     time_dim: int = 8
     time_n_knots: int = 0
     time_origin_us: int = 0
-    # softplus on the MLP output (with mlp_network_config.output_activation: None): the stage-1 time sky's output; an
-    # output ReLU can die for good
+    # Softplus on the MLP output, for use with mlp_network_config.output_activation: None (an output ReLU can die for
+    # good). Off by default.
     output_softplus: bool = False
 
 
@@ -1233,7 +1235,7 @@ class ECADStrategyConfig(MCMCStrategyConfig):
         relocation_decay_start: int = Field(
             default=10000, ge=0, description="From this step the share decays as exp(-((t - start) / sigma)^2 / 2)."
         )
-        relocation_decay_sigma: float = Field(default=5000.0, gt=0.0)
+        relocation_decay_sigma: float = Field(default=5000.0, gt=0.0, description="Width sigma (steps) of that decay.")
         sample_positions: bool = Field(
             default=True, description="Place each new Gaussian at a draw from N(mu, Sigma') of its source."
         )
@@ -1298,10 +1300,10 @@ class PPISPPostProcessingConfig(BasePostProcessingConfig):
     ppisp_lr: float = 0.002
     ppisp_eps: float = 1e-15
     ppisp_betas: tuple[float, float] = (0.9, 0.999)
-    # mcity multiclip (2026-11-09): update the per-frame PPISP rows (exposure, colour) only on the steps that train
-    # their image, each row with its own Adam step count (per-camera vignetting / CRF stay dense Adam). The library's
-    # dense Adam keeps moving a row on momentum after each of its rare samples (~5 per image in an 80 s stage 2),
-    # which left isolated over-exposed frames (+0.2 to +0.6 exposure). False: the library's dense Adam.
+    # Update the per-frame PPISP rows (exposure, colour) only on the steps that train their image, each row with its
+    # own Adam step count (per-camera vignetting / CRF stay plain Adam). The library's dense Adam keeps moving a row on
+    # momentum after each of its samples, which leaves isolated over-exposed frames when every image is sampled only
+    # a few times. False (default): the library's dense Adam; the mcity multi-clip stage-2 driver enables it.
     ppisp_row_selective: bool = False
 
     # Controller optimizer (forwarded to ppisp.PPISPConfig)
@@ -1318,11 +1320,11 @@ class PPISPPostProcessingConfig(BasePostProcessingConfig):
     scheduler_decay_max_steps: int = 30000
     scheduler_final_factor: float = 0.01
 
-    # Render-time per-frame parameters (mcity multiclip, 2026-11-06; default = the library's behaviour):
-    # "controller": the controller predicts exposure/colour for every frame (training frames too).
-    # "interp": a training frame uses its own fitted exposure/colour; a held-out frame the values interpolated
-    #   (by frame index) from the nearest training frames of the same camera before and after it. A diagnosis of
-    #   the controller (and a "re-render the recorded drive" protocol); training is unaffected.
+    # Per-frame exposure / colour at render time (training is unaffected):
+    # "controller" (default, the library's behaviour): the controller predicts them for every frame, training too.
+    # "interp": a training frame uses its own fitted values; a held-out frame the values interpolated (by frame
+    #   index) from the nearest training frames of the same camera before and after it. The mcity comparison score
+    #   renders with it.
     heldout_params: Literal["controller", "interp"] = "controller"
 
 
@@ -1415,9 +1417,9 @@ class SHGaussiansLayerConfig(BaseLayerConfig):
     precision: int | None = None
     transmittance_threshold: float | None = None
     scale_pos_lr_by_scene_extent: bool = False
-    # mcity multiclip (2026-11-08): the extent (m) the position learning rate is scaled by, instead of the dataset's
-    # (its longest trajectory axis + 2 x max_dist_m): a cell trained on part of the whole drive passes its own frames'
-    # extent; the dataset AABB itself (out-of-bound loss, initialisation) is unchanged. None: the dataset's.
+    # With scale_pos_lr_by_scene_extent, the extent (m) to scale the position learning rate by instead of the
+    # dataset's (its longest trajectory axis + 2 x max_dist_m), e.g. a cell's own extent when it trains on part of a
+    # larger dataset; the dataset AABB (out-of-bound loss, initialisation) is unchanged. None (default): the dataset's.
     pos_lr_scene_extent: Optional[float] = None
     debug_viz: bool = False
 

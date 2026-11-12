@@ -16,15 +16,14 @@ class SystemTestConfig(BaseConfigSchema):
     save_results: bool = False
     image_writer_threads: int = Field(
         default=0,
-        description="Background threads that encode and write the result PNGs, decoupled from rendering (PNG encoding "
-        "took ~75% of a colour-only render's time in the main thread; Pillow releases the GIL, so threads scale: mcity, "
-        "2026-11-06). Files are byte-identical to synchronous writing. 0 = write in the main thread. All writes finish "
-        "before the validation epoch ends.",
+        description="Background threads that encode and write the result PNGs while the next frames render (Pillow "
+        "releases the GIL while compressing); 0 writes them on the main thread. The files are identical either way. "
+        "Queued writes finish before videos are made and before the validation / test epoch ends.",
     )
     result_types: Optional[list[str]] = Field(
         default=None,
-        description="With save_results, the result images to write (e.g. [pred_rgb]); None = all of pred_rgb, "
-        "pred_distance, pred_normal, pred_opacity. A colour-only render skips the rest (mcity multiclip, 2026-11-06).",
+        description="With save_results, the predicted images to write, e.g. [pred_rgb] for colour only; None writes "
+        "all of pred_rgb, pred_distance, pred_normal and pred_opacity.",
     )
     save_inputs: bool = False
     save_videos: bool = False
@@ -138,7 +137,8 @@ class InitPartsConfig(BaseConfigSchema):
 class BaseGaussiansSystemConfig(BaseSystemConfig):
     init_parts: Optional[InitPartsConfig] = Field(
         default=None,
-        description="Copy (and optionally freeze) parameters from another checkpoint at setup, before any resume.",
+        description="At training setup, copy (and optionally freeze) parameters from another checkpoint; a resumed "
+        "checkpoint is restored afterwards and overwrites the copied values. None: off.",
     )
     scheduler: Optional[Any] = Field(
         default=None,

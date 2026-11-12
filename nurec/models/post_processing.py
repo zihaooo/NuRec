@@ -513,9 +513,9 @@ BasePostProcessing.register_variant("ppisp-post-processing-legacy", PPISPLegacyP
 class RowSelectiveAdam(torch.optim.Optimizer):
     """Adam for PPISP's main parameters in which the per-frame tensors (first dimension = training frames) update only
     the rows of the frames trained this step, each row with its own step count for the bias correction, as if every
-    frame had its own Adam that sees only its own samples (mcity multiclip, 2026-11-09). Rows not trained this step
-    keep their values and moments: no momentum drift, and the regularisers' gradient on them is dropped. Every other
-    parameter (per-camera vignetting / CRF) is plain Adam. `rows_fn` returns the trained rows (LongTensor) or None.
+    frame had its own Adam that sees only its own samples. Rows not trained this step keep their values and moments:
+    no momentum drift, and the regularisers' gradient on them is dropped. Every other parameter (per-camera
+    vignetting / CRF) is plain Adam. `rows_fn` returns the trained rows (LongTensor) or None.
     """
 
     def __init__(self, params, *, lr: float, betas: tuple[float, float], eps: float, row_params, rows_fn):

@@ -3746,7 +3746,7 @@ class GaussiansComposite(BaseModel, CompositeModel):
             target = swap_sky_for_ground(
                 rgb, pre_pp_rgb.reshape(-1, 3).to(rgb.dtype), sky.reshape(-1, 3).to(rgb.dtype), see_through, ground_rgb
             )
-        else:  # no stored sky colour: move the pixel towards the ground colour by its see-through share
+        else:  # no stored sky colour (or linear compositing): lerp towards the ground colour by the see-through share
             ground = torch.tensor(ground_rgb, dtype=rgb.dtype, device=rgb.device)
             target = torch.lerp(rgb, ground.expand_as(rgb), see_through)
         filled = ground_fill(

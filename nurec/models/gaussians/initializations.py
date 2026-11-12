@@ -509,7 +509,7 @@ class InitializationMixin(BaseInitialization):
             random_pts = torch.cat(random_pts_list, dim=0)
 
             # check visibility using camera frusta, one frustum at a time: stacking every frustum's mask needs
-            # (frusta x points) memory, 91 GB for the whole mcity drive's 30k camera frames (mcity multiclip, 2026-11-06)
+            # (frusta x points) memory, e.g. 91 GB for 30k camera frames
             visibility_mask = torch.zeros(random_pts.shape[0], dtype=torch.bool, device=random_pts.device)
             for camera_frustum in camera_frusta:
                 visibility_mask |= camera_frustum.points_in_frustum(random_pts).reshape(-1) > 0

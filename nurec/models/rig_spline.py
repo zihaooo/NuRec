@@ -88,8 +88,8 @@ class CameraExtrinsicResiduals(nn.Module):
         self.max_rotation_rad = max_rotation_rad
         self.trajectory_indices = nn.Buffer(trajectory_indices.detach().clone(), persistent=False)
         self.residuals = nn.Parameter(torch.zeros((trajectory_indices.numel(), 6), dtype=torch.float32))
-        # mcity multiclip (2026-11-08): frozen residuals are read detached, so they get no gradient (a tensor hook
-        # would be lost: NuRec's weights-only resume replaces parameters with load_state_dict(assign=True))
+        # Frozen residuals (camera_extrinsics.freeze) are read detached, so they get no gradient (a tensor hook would
+        # be lost: NuRec's weights-only resume replaces parameters with load_state_dict(assign=True))
         self.frozen = False
 
     @staticmethod
@@ -232,7 +232,7 @@ class PackedRigSpline(nn.Module):
         if skip_first_control:
             anchor_mask[control_offsets[:-1]] = 0.0
         self.anchor_mask = nn.Buffer(anchor_mask, persistent=False)
-        # mcity multiclip (2026-11-08): the controls this run optimises (set_active_controls); all by default.
+        # The controls this run optimises (set_active_controls, from rig_trajectory.active_frames_file); all by default.
         self.active_controls = nn.Buffer(
             torch.ones(self.controls.shape[0], dtype=torch.bool, device=starts.device), persistent=False
         )

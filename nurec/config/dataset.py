@@ -329,14 +329,14 @@ class NCoreDatasetConfig(_BaseDatasetSOConfig):
     )
     val_load_rgb: bool = Field(
         default=True,
-        description="Decode each validation frame's camera image (the ground truth). False for render-only runs: the "
-        "photo is then never loaded and validation computes no image metrics, only renders and saves outputs "
-        "(mcity multiclip colour-only renders, 2026-11-06).",
+        description="Decode each validation / test frame's camera image (the ground truth). False for render-only "
+        "runs: the photo is never loaded, so no image metrics are computed and input_rgb is not saved; renders are "
+        "still produced and saved.",
     )
     val_camera_frames_file: Optional[str] = Field(
-        description="JSON file: camera id -> local camera frame indices to validate / render (as the coverage sampler's "
-        "include_frames_file). Overrides val_camera_frame_start/step for cameras it lists; for cells whose frames are "
-        "not contiguous, e.g. place cells over a revisited drive (pipeline/multiclip/ncell, 2026-11-06).",
+        description="JSON file: camera id -> local camera frame indices to validate / render (as the coverage "
+        "sampler's include_frames_file). With val_camera_frame_step, replaces the start / step frames of the cameras "
+        "it lists, e.g. for a cell whose frames are not contiguous. None: off.",
         default=None,
     )
     val_camera_exclude_frame_start: Optional[int] = Field(
