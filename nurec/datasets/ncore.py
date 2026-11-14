@@ -2213,6 +2213,7 @@ class NCOREDataSource(BaseDataSource, RigTrajectoriesProvider):
         # V4 sequence loader parameters
         self.poses_component_group: str = config.poses_component_group
         self.intrinsics_component_group: str = config.intrinsics_component_group
+        self.camera_radial_delta_file: Optional[str] = getattr(config, "camera_radial_delta_file", None)
         self.masks_component_group: str = config.masks_component_group
         self.cuboids_component_group: str = config.cuboids_component_group
 
@@ -2491,6 +2492,18 @@ class NCOREDataSource(BaseDataSource, RigTrajectoriesProvider):
             camera_id: require_concrete_camera_parameters(camera_sensor.model_parameters)
             for camera_id, camera_sensor in self.camera_sensors.items()
         }
+        if self.camera_radial_delta_file:  # lens calibration correction (config.camera_radial_delta_file)
+            deltas = json.loads(Path(self.camera_radial_delta_file).read_text())
+            for camera_id, delta in deltas.items():
+                params = self.camera_model_parameters.get(camera_id)
+                if params is None:
+                    continue
+                if not isinstance(params, ncore.data.OpenCVPinholeCameraModelParameters):
+                    raise ValueError(f"camera_radial_delta_file: {camera_id} is not an OpenCV pinhole camera")
+                coeffs = np.array(params.radial_coeffs, dtype=np.float32).copy()
+                coeffs[: len(delta)] += np.asarray(delta, dtype=np.float32)
+                params.radial_coeffs = coeffs
+                logger.warning("camera %s: radial coefficients corrected by %s -> %s", camera_id, delta, coeffs.tolist())
 
         # restrict effective FOV of omnidirectional cameras for cuboid projections to prevent issues with *invalid* points projected
         # back into the valid image domain FOV - this way they get properly classified as invalid
