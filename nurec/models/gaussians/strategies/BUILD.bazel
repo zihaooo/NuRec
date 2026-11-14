@@ -48,6 +48,7 @@ py_library(
         "ecad.py",
         "gsplat.py",
         "mcmc.py",
+        "road_floor.py",
     ],
     deps = [
         ":pylib_gsplat_mcmc_adapter",
