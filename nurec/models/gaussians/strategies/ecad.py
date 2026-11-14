@@ -122,7 +122,6 @@ class ECADStrategy(MCMCStrategy):
         self._exempt: dict[str, torch.Tensor] = {}
         self._last_log: dict[str, float] = {}
         self._warned: set[str] = set()
-        self._road_grid: Optional[RoadFloorGrid] = None  # built from the datasource's rig poses at first use
         ECAD_RENDER_STATE.enabled = True
         e = self.config.ecad
         tqdm.write(
@@ -344,68 +343,10 @@ class ECADStrategy(MCMCStrategy):
         dead[torch.topk(scored, n, largest=False).indices] = True
         return dead
 
-    @torch.no_grad()
-    def _under_road(self, system, node: BaseGaussianModel) -> torch.Tensor:
-        """Rows out of bounds (config.ecad.road_floor): under the road near the drive and, when set, under the ground
-        margins farther out or above the ceiling; see road_floor.py."""
-        # imported here, so a build packed before road_floor.py existed still runs ECAD with the floor off
-        from nurec.models.gaussians.strategies.road_floor import (
-            RoadFloorGrid,
-            RoadHeightField,
-            out_of_bounds,
-            rig_origins_in_nurec,
-        )
-
-        rf = self.config.ecad.road_floor
-        if self._road_grid is None:
-            rig_trajectories = system.datasource_summary.get_rig_trajectories()
-            if rig_trajectories is None:
-                raise ValueError("ecad.road_floor needs the datasource's rig trajectories")
-            origins, scale = rig_origins_in_nurec(rig_trajectories)
-            self._road_scale = scale
-            self._road_grid = RoadFloorGrid.from_rig_origins(
-                origins, rf.below_rig_m * scale, rf.corridor_m * scale, rf.grid_m * scale
-            ).to(node.positions.device)
-            self._road_field = None
-            if rf.near_margin_m is not None or rf.far_margin_m is not None or rf.ceiling_m is not None:
-                self._road_field = RoadHeightField.from_rig_origins(
-                    origins, rf.below_rig_m * scale, rf.field_extent_m * scale, rf.field_cell_m * scale
-                ).to(node.positions.device)
-            tqdm.write(
-                f"ECAD road floor: {len(origins)} rig poses, road {rf.below_rig_m} m below the rig origin, corridor "
-                f"{rf.corridor_m} m, margin {rf.margin_m} m; grid {tuple(self._road_grid.zgrid.shape)} at {rf.grid_m} m, "
-                f"{self._road_grid.n_cells} road cells"
-                + (
-                    f"; beyond: {rf.near_margin_m} m below to {rf.near_distance_m} m, {rf.far_margin_m} m below beyond, "
-                    f"ceiling {rf.ceiling_m} m; scene grid {tuple(self._road_field.road.shape)} at {rf.field_cell_m} m"
-                    if self._road_field is not None
-                    else ""
-                )
-            )
-        s = self._road_scale
-        parts = out_of_bounds(
-            node.positions,
-            self._road_grid,
-            rf.margin_m * s,
-            self._road_field,
-            None if rf.near_margin_m is None else rf.near_margin_m * s,
-            rf.near_distance_m * s,
-            None if rf.far_margin_m is None else rf.far_margin_m * s,
-            None if rf.ceiling_m is None else rf.ceiling_m * s,
-        )
-        for key in ("road", "ground", "ceiling"):
-            self._last_log[f"bounds_{key}"] = self._last_log.get(f"bounds_{key}", 0.0) + float(parts[key].sum().item())
-        return parts["any"]
-
     @ScopedTimer("ECADStrategy/densify")
     @torch.no_grad()
     def _densify(
-        self,
-        gaussians_nodes: TypedModuleDict[BaseGaussianModel],
-        step: int,
-        relocate: bool,
-        add: bool,
-        under: Optional[torch.Tensor] = None,
+        self, gaussians_nodes: TypedModuleDict[BaseGaussianModel], step: int, relocate: bool, add: bool
     ) -> dict[str, float]:
         layer_id = self._single_layer(gaussians_nodes)
         node = gaussians_nodes[layer_id]
@@ -417,10 +358,6 @@ class ECADStrategy(MCMCStrategy):
 
         if relocate:
             dead = self._relocation_count(num, step, self._contribution[layer_id], self._exempt[layer_id])
-            if under is not None:  # road floor: every Gaussian under the road goes too (newly placed ones next time)
-                forced = under & ~self._exempt[layer_id] & ~dead
-                stats["under_road"] = float(forced.sum().item())
-                dead |= forced
             n_dead = int(dead.sum().item())
             if 0 < n_dead < num:
                 sources = self._draw_sources(
@@ -481,23 +418,8 @@ class ECADStrategy(MCMCStrategy):
 
         relocate = self._is_topology_mutation_due(global_step, self.config.relocate)
         add = self._is_topology_mutation_due(global_step, self.config.add)
-        under = None
-        if self.config.ecad.road_floor.enabled:
-            node = gaussians_nodes[self._single_layer(gaussians_nodes)]
-            if relocate:
-                under = self._under_road(system, node)
-            elif (
-                global_step >= self.config.relocate.end_iteration
-                and global_step % max(1, self.config.relocate.frequency) == 0
-            ):  # relocation is over: make the Gaussians that drifted or were placed under the road transparent
-                gone = self._under_road(system, node)
-                with torch.no_grad():
-                    node.densities[gone] = -20.0
-                self._last_log["under_road_hidden"] = self._last_log.get("under_road_hidden", 0.0) + float(
-                    gone.sum().item()
-                )
         if relocate or add:
-            stats = self._densify(gaussians_nodes, global_step, relocate, add, under=under)
+            stats = self._densify(gaussians_nodes, global_step, relocate, add)
             if stats and self._empty_cache_after_parameter_update:
                 torch.cuda.empty_cache()
             for key, value in stats.items():
@@ -547,14 +469,6 @@ class ECADStrategy(MCMCStrategy):
             f"p10={float(torch.exp(gamma.quantile(0.1) if gamma.numel() < 16_000_000 else gamma.median())):.3f}; "
             f"opacity<1/255 {float((opacity < _ALPHA_THRESHOLD).float().mean()):.1%}; "
             f"zero-contribution share {zero_share:.1%}{contribution_text}"
-            + (
-                f"; road floor: relocated {int(self._last_log.get('under_road', 0))}, hidden "
-                f"{int(self._last_log.get('under_road_hidden', 0))} since last log (flagged: road "
-                f"{int(self._last_log.get('bounds_road', 0))}, ground {int(self._last_log.get('bounds_ground', 0))}, "
-                f"ceiling {int(self._last_log.get('bounds_ceiling', 0))})"
-                if self.config.ecad.road_floor.enabled
-                else ""
-            )
         )
         self._last_log.clear()
 

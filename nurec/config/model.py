@@ -1205,39 +1205,6 @@ class MCMCStrategyConfig(BaseStrategyConfig):
     )
 
 
-class ECADRoadFloorConfig(BaseConfigSchema):
-    """mcity multiclip (2026-11-12): no Gaussians under the road the rig drove on. Within `corridor_m` of the drive
-    line, a Gaussian centred more than `margin_m` below the road (`below_rig_m` under the nearest rig origin) is
-    relocated at every relocation step, on top of ECAD's own share, and after relocation ends it is made transparent
-    every `relocate.frequency` steps. Needs a NuRec frame with the world's z axis up."""
-
-    enabled: bool = Field(default=False, description="Apply the road floor.")
-    below_rig_m: float = Field(
-        default=0.81, gt=0.0, description="Road surface below the rig origin, in metres (measure per scene)."
-    )
-    margin_m: float = Field(default=0.3, ge=0.0, description="Tolerance below the road surface, in metres.")
-    corridor_m: float = Field(
-        default=6.0, gt=0.0, description="Horizontal distance from the drive line the floor applies within, in metres."
-    )
-    grid_m: float = Field(default=0.5, gt=0.0, description="Cell size of the road height grid, in metres.")
-    # Beyond the corridor (2026-11-13, the user): the same rule with wider margins, by horizontal distance from the drive
-    # line, and a ceiling everywhere; road height from the nearest rig pose on a coarse grid over the whole scene.
-    near_margin_m: float | None = Field(
-        default=None, gt=0.0, description="Below-road margin from corridor_m to near_distance_m, m (None: no rule)."
-    )
-    near_distance_m: float = Field(default=50.0, gt=0.0, description="Outer distance of the near band, in metres.")
-    far_margin_m: float | None = Field(
-        default=None, gt=0.0, description="Below-road margin beyond near_distance_m, in metres (None: no rule)."
-    )
-    ceiling_m: float | None = Field(
-        default=None, gt=0.0, description="Remove Gaussians this far above the road at any distance, m (None: off)."
-    )
-    field_cell_m: float = Field(default=2.0, gt=0.0, description="Cell size of the whole-scene grid, in metres.")
-    field_extent_m: float = Field(
-        default=600.0, gt=0.0, description="Whole-scene grid reach beyond the drive's bounding box, in metres."
-    )
-
-
 class ECADStrategyConfig(MCMCStrategyConfig):
     """Efficient Confidence-Aware Densification (Hofer et al., arXiv 2610.13541) on top of the MCMC strategy.
 
@@ -1278,9 +1245,6 @@ class ECADStrategyConfig(MCMCStrategyConfig):
             description="Initial log-confidence gamma written to camera_extra_signal[:, 0] on a fresh start.",
         )
         log_every: int = Field(default=1000, ge=0, description="Print ECAD statistics every this many steps (0 = off).")
-        road_floor: ECADRoadFloorConfig = Field(
-            default_factory=ECADRoadFloorConfig, description="No Gaussians under the road (off by default)."
-        )
 
     name: Literal["ecad"]  # type: ignore[assignment]
 
