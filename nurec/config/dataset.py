@@ -258,11 +258,6 @@ class NCoreDatasetConfig(_BaseDatasetSOConfig):
     )
     seek_offset_sec: float | None
     duration_sec: float | None
-    camera_radial_delta_file: Optional[str] = Field(
-        default=None,
-        description="JSON {camera id: [dk1, dk2, ...]} added to each listed OpenCV pinhole camera's radial distortion "
-        "coefficients after loading (a lens calibration correction). None: the dataset's own coefficients.",
-    )
 
     # Sensors and sensor models
     camera_ids: list[str]
