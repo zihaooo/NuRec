@@ -712,6 +712,44 @@ class StepFunLinearLR(StepFunLRSchedulerMixin, LinearLR):
         super().__init__(optimizer, start_factor, end_factor, total_iters, last_epoch)
 
 
+class WarmupExponentialLR(LRScheduler):
+    """
+    A linear warm-up from `start_factor` to 1 over `warmup_steps` steps, multiplied by an exponential decay `gamma^t`
+    from step 0: lr(t) = base_lr * (start_factor + (1 - start_factor) * min(t, warmup_steps) / warmup_steps) * gamma^t.
+    For a run that starts from a trained model (a warm start), whose fresh Adam state otherwise moves every parameter by
+    about one learning rate per step at first. Closed form on `base_lrs` (unlike Sequential/ChainedScheduler), so the
+    Gaussian model's scene-extent scaling of the position group's `base_lrs` carries through. gamma=1: warm-up only.
+    """
+
+    def __init__(
+        self,
+        optimizer: Optimizer,
+        interval: str,
+        trainer: TrainerConfig,
+        warmup_steps: int,
+        start_factor: float,
+        gamma: float = 1.0,
+        last_epoch: int = -1,
+    ):
+        if interval == "step":
+            warmup_steps = adjust_step_for_world_size(trainer, warmup_steps)
+            gamma = adjust_gamma_for_world_size(trainer, gamma)
+        assert warmup_steps >= 1 and 0.0 < start_factor <= 1.0, (warmup_steps, start_factor)
+        self.warmup_steps, self.start_factor, self.gamma = int(warmup_steps), float(start_factor), float(gamma)
+        super().__init__(optimizer, last_epoch)
+
+    def _factor(self, t: int) -> float:
+        ramp = min(t, self.warmup_steps) / self.warmup_steps
+        return (self.start_factor + (1.0 - self.start_factor) * ramp) * self.gamma**t
+
+    def get_lr(self) -> list[float]:
+        return [base_lr * self._factor(self.last_epoch) for base_lr in self.base_lrs]
+
+    def _get_closed_form_lr(self) -> list[float]:
+        return self.get_lr()
+
+
 _StepFunSchedulers: dict[str, Type[LRScheduler]] = {
-    cls.__name__: cls for cls in (StepFunCosineAnnealingLR, StepFunPolynomialLR, StepFunExponentialLR, StepFunLinearLR)
+    cls.__name__: cls
+    for cls in (StepFunCosineAnnealingLR, StepFunPolynomialLR, StepFunExponentialLR, StepFunLinearLR, WarmupExponentialLR)
 }
