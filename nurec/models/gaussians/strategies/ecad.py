@@ -67,6 +67,20 @@ def _rank01(values: torch.Tensor) -> torch.Tensor:
     return ranks / max(n - 1, 1)
 
 
+_MULTINOMIAL_MAX = 2**24  # torch.multinomial's limit on the number of categories
+
+
+def _draw_with_replacement(weight: torch.Tensor, n: int, generator: torch.Generator | None) -> torch.Tensor:
+    """n indices drawn with replacement in proportion to weight. torch.multinomial up to 2^24 rows (unchanged
+    behaviour); above it, which a layer of more than ~16.8M Gaussians reaches, an exact inverse-CDF draw (float64
+    cumulative sum, uniform samples, binary search): rows of zero weight are never drawn."""
+    if weight.numel() <= _MULTINOMIAL_MAX:
+        return torch.multinomial(weight, n, replacement=True, generator=generator)
+    cdf = torch.cumsum(weight.double(), 0)
+    u = torch.rand(n, generator=generator, device=weight.device, dtype=torch.float64) * cdf[-1]
+    return torch.searchsorted(cdf, u, right=True).clamp_max(weight.numel() - 1)
+
+
 def _quat_to_rotmat(quats: torch.Tensor) -> torch.Tensor:
     """[K, 4] wxyz quaternions (gsplat's convention) to [K, 3, 3] rotation matrices."""
     w, x, y, z = torch.nn.functional.normalize(quats, dim=-1).unbind(-1)
@@ -251,9 +265,9 @@ class ECADStrategy(MCMCStrategy):
         n_grad = round(self.config.ecad.gradient_share * count) if has_grad and has_ssim else (count if has_grad else 0)
         parts = []
         if n_grad > 0:
-            parts.append(torch.multinomial(weight_grad, n_grad, replacement=True, generator=generator))
+            parts.append(_draw_with_replacement(weight_grad, n_grad, generator))
         if count - n_grad > 0:
-            parts.append(torch.multinomial(weight_ssim, count - n_grad, replacement=True, generator=generator))
+            parts.append(_draw_with_replacement(weight_ssim, count - n_grad, generator))
         return torch.cat(parts)
 
     def _plan(
