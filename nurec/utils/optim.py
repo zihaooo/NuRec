@@ -749,66 +749,7 @@ class WarmupExponentialLR(LRScheduler):
         return self.get_lr()
 
 
-class WarmupStableDecayLR(LRScheduler):
-    """
-    Warm-up, stable, decay: a linear ramp from `start_factor` to 1 over `warmup_steps`, the full rate until
-    `decay_start`, then a decay to `final_factor` at `total_steps` (`shape`: exp, cos or linear), held after it.
-    For a warm start that should explore at its peak rate for most of the run and refine in a short anneal at the end
-    (mcity 2026-11-16). Closed form on `base_lrs`, like WarmupExponentialLR, so the scene-extent scaling still applies.
-    """
-
-    def __init__(
-        self,
-        optimizer: Optimizer,
-        interval: str,
-        trainer: TrainerConfig,
-        warmup_steps: int,
-        start_factor: float,
-        decay_start: int,
-        total_steps: int,
-        final_factor: float,
-        shape: str = "exp",
-        last_epoch: int = -1,
-    ):
-        if interval == "step":
-            warmup_steps = adjust_step_for_world_size(trainer, warmup_steps)
-            decay_start = adjust_step_for_world_size(trainer, decay_start)
-            total_steps = adjust_step_for_world_size(trainer, total_steps)
-        assert 1 <= warmup_steps <= decay_start < total_steps, (warmup_steps, decay_start, total_steps)
-        assert 0.0 < start_factor <= 1.0 and 0.0 < final_factor <= 1.0 and shape in ("exp", "cos", "linear")
-        self.warmup_steps, self.start_factor = int(warmup_steps), float(start_factor)
-        self.decay_start, self.total_steps = int(decay_start), int(total_steps)
-        self.final_factor, self.shape = float(final_factor), shape
-        super().__init__(optimizer, last_epoch)
-
-    def _factor(self, t: int) -> float:
-        if t < self.warmup_steps:
-            return self.start_factor + (1.0 - self.start_factor) * t / self.warmup_steps
-        if t < self.decay_start:
-            return 1.0
-        x = min((t - self.decay_start) / (self.total_steps - self.decay_start), 1.0)
-        f = self.final_factor
-        if self.shape == "exp":
-            return f**x
-        if self.shape == "cos":
-            return f + (1.0 - f) * 0.5 * (1.0 + math.cos(math.pi * x))
-        return 1.0 - (1.0 - f) * x
-
-    def get_lr(self) -> list[float]:
-        return [base_lr * self._factor(self.last_epoch) for base_lr in self.base_lrs]
-
-    def _get_closed_form_lr(self) -> list[float]:
-        return self.get_lr()
-
-
 _StepFunSchedulers: dict[str, Type[LRScheduler]] = {
     cls.__name__: cls
-    for cls in (
-        StepFunCosineAnnealingLR,
-        StepFunPolynomialLR,
-        StepFunExponentialLR,
-        StepFunLinearLR,
-        WarmupExponentialLR,
-        WarmupStableDecayLR,
-    )
+    for cls in (StepFunCosineAnnealingLR, StepFunPolynomialLR, StepFunExponentialLR, StepFunLinearLR, WarmupExponentialLR)
 }
