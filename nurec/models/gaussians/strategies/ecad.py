@@ -285,13 +285,27 @@ class ECADStrategy(MCMCStrategy):
         occurrences = torch.bincount(sources, minlength=opacity_logits.numel())[sources]
         ratios = (occurrences + 1).clamp(max=self.binoms.shape[0]).to(torch.int32)
         scales = torch.exp(log_scales[sources]).clamp_min(torch.finfo(torch.float32).tiny)
+        opacities = torch.sigmoid(opacity_logits[sources]).float().contiguous()
+        scales = scales.float().contiguous()
         revised_opacities, revised_scales = compute_relocation(
-            torch.sigmoid(opacity_logits[sources]).float().contiguous(),
-            scales.float().contiguous(),
-            ratios,
-            self.binoms,
-            self.config.opacity_threshold,
+            opacities, scales, ratios, self.binoms, self.config.opacity_threshold
         )
+        # A source drawn many times (error-guided draws repeat high-error rows) splits into many children; Eq. 9's
+        # alternating sum then cancels in float32 and a revised scale can come out non-positive, which gsplat's row-plan
+        # check rejects (P12_wd4elens, step 14k). Recompute only those rows with half the children until they are
+        # valid; rows that were valid are untouched, so runs that never hit this are unchanged.
+        bad = ~(torch.isfinite(revised_scales).all(-1) & (revised_scales > 0).all(-1) & torch.isfinite(revised_opacities))
+        if bad.any():
+            self._warn_once("split", f"ECAD: {int(bad.sum())} split rows with non-positive revised scales; recomputing with fewer children")
+            for _ in range(8):
+                ratios[bad] = (ratios[bad] // 2).clamp_min(2)
+                o, s = compute_relocation(opacities[bad], scales[bad], ratios[bad], self.binoms, self.config.opacity_threshold)
+                revised_opacities[bad], revised_scales[bad] = o, s
+                bad = ~(torch.isfinite(revised_scales).all(-1) & (revised_scales > 0).all(-1) & torch.isfinite(revised_opacities))
+                if not bad.any():
+                    break
+            if bad.any():  # last resort: keep the source's own opacity and scale for these few rows
+                revised_opacities[bad], revised_scales[bad] = opacities[bad], scales[bad]
         return MCMCRowPlan(
             operation=operation,
             keep=keep,
