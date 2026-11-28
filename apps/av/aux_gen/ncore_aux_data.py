@@ -1545,6 +1545,12 @@ def run_lidar_segmentation_parallel(
         pattern="*.aux.lidar-sseg.zarr.itar",
         output_dir=output_path,
     )
+    # the workers also write the lidar-camera visibility; merge it like the semantics (serial mode writes both)
+    merge_zarr_itar(
+        root_dir=Path(output_path / "lidar_seg"),
+        pattern="*.aux.lidar-camvis.zarr.itar",
+        output_dir=output_path,
+    )
 
     return final_output_fp
 
